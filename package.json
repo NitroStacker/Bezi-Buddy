@@ -1,0 +1,31 @@
+{
+  "name": "bezi-remote",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "dev:mobile": "pnpm --filter @bezi-remote/mobile start",
+    "dev:relay": "pnpm --filter @bezi-remote/relay dev",
+    "dev:companion:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Companion-Native.ps1 dev",
+    "proof:expo-go": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-ExpoGoProof.ps1",
+    "build:companion:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Companion-Native.ps1 build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm -r --if-present lint",
+    "smoke:relay": "node scripts/smoke-relay.mjs",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "esbuild",
+      "sharp",
+      "unrs-resolver",
+      "workerd"
+    ]
+  }
+}

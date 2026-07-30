@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "app.beziremote.unity": "file:../../../packages/unity",
+    "com.unity.test-framework": "1.6.0"
+  },
+  "testables": [
+    "app.beziremote.unity"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@bezi-remote/companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:native": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/Companion-Native.ps1 dev",
+    "dev:ui": "vite --host 127.0.0.1",
+    "build": "tauri build",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/Companion-Native.ps1 build",
+    "build:ui": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.4",
+    "@types/qrcode": "^1.5.5",
+    "typescript": "5.8.3",
+    "vite": "^6.2.6",
+    "vitest": "3.1.1"
+  }
+}

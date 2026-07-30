@@ -1,0 +1,33 @@
+node_modules/
+.pnpm-store/
+.expo/
+dist/
+dist-web/
+coverage/
+.wrangler/
+.proof/
+.dev.vars
+.env
+.env.*
+!.env.example
+*.log
+
+# Rust / Tauri
+target/
+apps/companion/src-tauri/gen/
+
+# Unity generated folders
+Library/
+Temp/
+Obj/
+Logs/
+UserSettings/
+validation/unity-proof/test-results.xml
+validation/unity-proof/ProjectSettings/*
+!validation/unity-proof/ProjectSettings/ProjectVersion.txt
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,15 @@
+{
+  "name": "Bezi.Remote.Editor.Tests",
+  "rootNamespace": "Bezi.Remote.Editor.Tests",
+  "references": [
+    "Bezi.Remote.Editor"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "autoReferenced": false
+}
+

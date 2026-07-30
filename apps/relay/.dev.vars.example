@@ -1,0 +1,7 @@
+# Generate a high-entropy value. Enter it manually in the Expo Go proof app.
+DEV_OWNER_TOKEN=replace-with-at-least-32-random-characters
+
+# Optional Cloudflare Realtime TURN credentials.
+TURN_KEY_ID=
+TURN_API_TOKEN=
+

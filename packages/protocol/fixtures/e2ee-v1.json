@@ -1,0 +1,25 @@
+{
+  "pairSecret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+  "sessionSalt": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+  "hostId": "host-00000000-0000-0000-0000-000000000001",
+  "mobileDeviceId": "mobile-00000000-0000-0000-0000-000000000002",
+  "connectionId": "00000000-0000-4000-8000-000000000003",
+  "frame": {
+    "v": 1,
+    "hostId": "host-00000000-0000-0000-0000-000000000001",
+    "connectionId": "00000000-0000-4000-8000-000000000003",
+    "direction": "mobile-to-host",
+    "kind": "control",
+    "seq": 42,
+    "nonce": "AQIDBAAAAAAAAAAq",
+    "ciphertext": "BHs3kmpvJrgTlDMS/Rt/GZDMMTzCRrYnvhJw7RCPogdf+bdmquqNPaFFsTD/CaATeX/IDM4KR9D07fmzkYU4PAQ5WqOdg4uBhVZIb9mvrwga62H0Sw6THQQQs9z+Q2t47+2319u+QyxtMcuLoJb8HNwNUYsKrtpymV3Y9gA="
+  },
+  "payload": {
+    "v": 1,
+    "requestId": "00000000-0000-4000-8000-000000000004",
+    "type": "unity.play",
+    "body": {
+      "instanceId": "active"
+    }
+  }
+}

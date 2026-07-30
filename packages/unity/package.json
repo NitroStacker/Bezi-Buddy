@@ -1,0 +1,17 @@
+{
+  "name": "app.beziremote.unity",
+  "version": "0.1.0",
+  "displayName": "Bezi Remote Unity Integration",
+  "description": "Editor-only semantic controls for the Bezi Remote Windows companion.",
+  "unity": "6000.0",
+  "keywords": [
+    "editor",
+    "remote",
+    "companion"
+  ],
+  "author": {
+    "name": "Bezi Remote"
+  },
+  "hideInEditor": false
+}
+

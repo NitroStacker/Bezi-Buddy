@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Bezi Remote Companion</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div class="brand-mark" aria-hidden="true"><span></span></div>
+        <div>
+          <p class="eyebrow">BEZI REMOTE</p>
+          <h1>Windows companion</h1>
+          <p class="lede">Your PC stays private. Only paired phones can connect.</p>
+        </div>
+        <div id="relay-pill" class="pill"><i></i><span>Not configured</span></div>
+      </header>
+
+      <section class="status-grid" aria-label="Application status">
+        <article class="status-card">
+          <div class="status-icon">B</div>
+          <div><strong>Bezi</strong><span id="bezi-status">Checking…</span></div>
+        </article>
+        <article class="status-card">
+          <div class="status-icon unity">U</div>
+          <div><strong>Unity</strong><span id="unity-status">Waiting for package</span></div>
+        </article>
+        <article class="status-card">
+          <div class="status-icon stream">S</div>
+          <div><strong>Stream</strong><span id="stream-status">Checking media stack</span></div>
+        </article>
+        <article class="status-card">
+          <div class="status-icon secure">✓</div>
+          <div><strong>Control</strong><span id="control-status">Disarmed</span></div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-copy">
+          <p class="eyebrow">SINGLE-OWNER PROOF</p>
+          <h2>Pair your iPhone</h2>
+          <p>Enter the development relay once, then scan the private QR from the Expo Go app.</p>
+          <form id="pair-form">
+            <label>
+              Relay URL
+              <input id="relay-url" type="url" required placeholder="https://example.workers.dev" autocomplete="url" />
+            </label>
+            <label>
+              Development owner token
+              <input id="owner-token" type="password" required minlength="32" placeholder="Stored in Windows Credential Manager" autocomplete="off" />
+            </label>
+            <button id="pair-button" type="submit">Create private pairing code</button>
+            <p id="form-error" role="alert"></p>
+          </form>
+        </div>
+        <div class="qr-area">
+          <div id="qr-frame">
+            <canvas id="qr"></canvas>
+            <div id="qr-empty"><span class="scan-glyph"></span><p>Pairing code appears here</p></div>
+          </div>
+          <p id="qr-caption">Codes expire after five minutes.</p>
+        </div>
+      </section>
+
+      <footer>
+        <span id="host-id">Host ID loading…</span>
+        <span>Remote input is always disarmed after disconnect or Windows lock.</span>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
