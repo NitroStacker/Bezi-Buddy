@@ -51,6 +51,27 @@ the local relay, Metro, Quick Tunnel, and native companion. It does not require
 Wrangler login or remote Cloudflare resources. Press Ctrl+C in that terminal to
 stop the complete proof session.
 
+For a one-click Windows launcher, build it once and then double-click the EXE:
+
+```powershell
+pnpm build:windows-launcher
+```
+
+The self-contained launcher is written to
+`dist\bezi-buddy\Bezi Buddy.exe`. It starts the built native
+companion and the complete Expo Go relay, prints the temporary `exp://` URL,
+copies it to the Windows clipboard, and keeps the session open until Ctrl+C.
+Its terminal shows the Bezi mascot, a welcome animation, and the current startup
+stage while the local relay, Cloudflare hostname, Expo Go, and companion load.
+The companion starts hidden in the Windows notification area when launched by
+Bezi Buddy; use its tray menu if you need to open the companion window.
+
+On its first email-enabled launch, Bezi Buddy opens Google's App Password setup
+and prompts locally for a dedicated Gmail App Password. After a successful test
+message, the credential is encrypted for the current Windows user under Local
+AppData. Every future proof session emails its clickable Expo Go URL to the
+configured inbox after the public relay becomes ready.
+
 The architecture and current implementation status are documented in
 [`docs/architecture.md`](docs/architecture.md) and
 [`executions/2026-07-28-bezi-remote.md`](executions/2026-07-28-bezi-remote.md).

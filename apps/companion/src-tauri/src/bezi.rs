@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::PathBuf,
     sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -45,13 +45,28 @@ pub struct AcpSnapshot {
 
 static CACHED_PROJECT_WORKSPACES: OnceLock<Mutex<(Option<Instant>, HashMap<String, String>)>> =
     OnceLock::new();
-static CACHED_WORKSPACE_CATALOG: OnceLock<Mutex<(Option<Instant>, CachedWorkspaceCatalog)>> =
-    OnceLock::new();
+static CACHED_WORKSPACE_CATALOG: OnceLock<Mutex<CachedWorkspaceCatalogCache>> = OnceLock::new();
+static VERIFIED_WORKSPACE_PAGES: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 
 #[derive(Clone, Default)]
 struct CachedWorkspaceCatalog {
     names: HashMap<String, String>,
     pages: HashMap<String, Value>,
+}
+
+#[derive(Default)]
+struct CachedWorkspaceCatalogCache {
+    checked_at: Option<Instant>,
+    files: HashMap<PathBuf, CachedWorkspaceFile>,
+    catalog: CachedWorkspaceCatalog,
+}
+
+struct CachedWorkspaceFile {
+    modified_at: Option<SystemTime>,
+    length: u64,
+    page_workspaces: HashMap<String, String>,
+    names: HashMap<String, String>,
+    node_sets: Vec<Vec<Value>>,
 }
 
 pub fn status() -> BeziStatus {
@@ -72,14 +87,14 @@ pub fn status() -> BeziStatus {
 }
 
 pub fn workspace_snapshot() -> Value {
-    workspace_snapshot_inner(false)
+    workspace_snapshot_inner(false, false)
 }
 
-pub fn workspace_snapshot_with_ui() -> Value {
-    workspace_snapshot_inner(true)
+pub fn workspace_snapshot_with_ui(complete_pages: bool) -> Value {
+    workspace_snapshot_inner(true, complete_pages)
 }
 
-fn workspace_snapshot_inner(include_ui: bool) -> Value {
+fn workspace_snapshot_inner(include_ui: bool, complete_pages: bool) -> Value {
     let Some(root) = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .map(|path| path.join("com.bezi.app"))
@@ -127,9 +142,9 @@ fn workspace_snapshot_inner(include_ui: bool) -> Value {
         .collect::<HashMap<_, _>>();
     let project_ids = project_by_id.keys().cloned().collect::<HashSet<_>>();
     let cached_project_workspaces = read_cached_project_workspaces(&project_ids);
-    let cached_workspace_catalog = read_cached_workspace_catalog();
+    let mut cached_workspace_catalog = read_cached_workspace_catalog();
     let ui = if include_ui {
-        crate::bezi_ui::snapshot(&project_ids, &root.join("canvases"))
+        crate::bezi_ui::snapshot(&project_ids, &root.join("canvases"), complete_pages)
     } else {
         json!({
             "pages": [],
@@ -205,7 +220,21 @@ fn workspace_snapshot_inner(include_ui: bool) -> Value {
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .unwrap_or_else(|| json!({}));
-    let active_workspace_id = read_active_workspace_id();
+    let active_workspace_id =
+        resolve_current_workspace_id(read_active_workspace_id(), &workspace_document).or_else(
+            || {
+                sessions
+                    .first()
+                    .and_then(|session| session.get("workspaceId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            },
+        );
+    retain_verified_workspace_pages(
+        &mut cached_workspace_catalog,
+        active_workspace_id.as_deref(),
+        &ui,
+    );
     let active_project_by_workspace = workspace_document
         .get("active_project")
         .and_then(Value::as_object);
@@ -442,7 +471,10 @@ fn build_workspace_catalog(
                 })
                 .unwrap_or_else(|| format!("Workspace {}", &workspace_id[..8]));
             let workspace_ui = if is_active {
-                ui.clone()
+                merge_active_workspace_ui(
+                    ui,
+                    verified_workspace_ui(cached_workspace_catalog.pages.get(&workspace_id)),
+                )
             } else {
                 cached_workspace_catalog
                     .pages
@@ -462,6 +494,138 @@ fn build_workspace_catalog(
         .collect()
 }
 
+fn verified_workspace_ui(cached_ui: Option<&Value>) -> Option<&Value> {
+    cached_ui.filter(|value| value.get("verified").and_then(Value::as_bool) == Some(true))
+}
+
+fn merge_active_workspace_ui(live_ui: &Value, cached_ui: Option<&Value>) -> Value {
+    let Some(cached_pages) = cached_ui
+        .and_then(|value| value.get("pages"))
+        .and_then(Value::as_array)
+        .filter(|pages| !pages.is_empty())
+    else {
+        return live_ui.clone();
+    };
+    if live_ui.get("available").and_then(Value::as_bool) != Some(true) {
+        let mut merged = live_ui.clone();
+        if let Some(object) = merged.as_object_mut() {
+            object.insert("pages".to_owned(), Value::Array(cached_pages.clone()));
+            object.insert("cached".to_owned(), Value::Bool(true));
+        }
+        return merged;
+    }
+    let live_pages = live_ui
+        .get("pages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if live_ui.get("pagesComplete").and_then(Value::as_bool) == Some(true) {
+        let pages = live_pages
+            .into_iter()
+            .map(|mut item| {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("remote".to_owned(), Value::Bool(true));
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+        let mut merged = live_ui.clone();
+        if let Some(object) = merged.as_object_mut() {
+            object.insert("pages".to_owned(), Value::Array(pages));
+            object.insert("cached".to_owned(), Value::Bool(false));
+        }
+        return merged;
+    }
+    let live_by_id = live_pages
+        .iter()
+        .filter_map(|item| Some((item.get("id")?.as_str()?.to_owned(), item)))
+        .collect::<HashMap<_, _>>();
+    let mut merged_ids = HashSet::new();
+    let mut merged_pages = Vec::with_capacity(cached_pages.len() + live_pages.len());
+
+    // The cache is a complete node response, while the accessibility tree is only
+    // the currently materialized sidebar viewport. Preserve cache order/hierarchy
+    // and use live UI solely to overlay visible state such as title/expansion.
+    for cached_item in cached_pages {
+        let Some(id) = cached_item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut item = cached_item.clone();
+        if let (Some(object), Some(live_object)) = (
+            item.as_object_mut(),
+            live_by_id.get(id).and_then(|value| value.as_object()),
+        ) {
+            for (key, value) in live_object {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(object) = item.as_object_mut() {
+            object.insert("remote".to_owned(), Value::Bool(true));
+        }
+        merged_ids.insert(id.to_owned());
+        merged_pages.push(item);
+    }
+
+    // A just-created page can reach the rendered UI before the WebView cache is
+    // flushed. Include it immediately without allowing viewport absence to delete
+    // anything from the complete catalog.
+    let mut previous_live_id: Option<String> = None;
+    for (live_index, live_item) in live_pages.iter().enumerate() {
+        let Some(id) = live_item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if merged_ids.contains(id) {
+            previous_live_id = Some(id.to_owned());
+            continue;
+        }
+        let insertion_index = previous_live_id
+            .as_deref()
+            .and_then(|previous_id| {
+                let previous_index = merged_pages
+                    .iter()
+                    .position(|item| item.get("id").and_then(Value::as_str) == Some(previous_id))?;
+                let previous_depth = merged_pages[previous_index]
+                    .get("depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                Some(
+                    merged_pages
+                        .iter()
+                        .enumerate()
+                        .skip(previous_index + 1)
+                        .find(|(_, item)| {
+                            item.get("depth").and_then(Value::as_u64).unwrap_or(0) <= previous_depth
+                        })
+                        .map(|(index, _)| index)
+                        .unwrap_or(merged_pages.len()),
+                )
+            })
+            .or_else(|| {
+                live_pages.iter().skip(live_index + 1).find_map(|next| {
+                    let next_id = next.get("id").and_then(Value::as_str)?;
+                    merged_pages
+                        .iter()
+                        .position(|item| item.get("id").and_then(Value::as_str) == Some(next_id))
+                })
+            })
+            .unwrap_or(merged_pages.len());
+        let mut item = live_item.clone();
+        if let Some(object) = item.as_object_mut() {
+            object.insert("remote".to_owned(), Value::Bool(true));
+        }
+        merged_pages.insert(insertion_index, item);
+        merged_ids.insert(id.to_owned());
+        previous_live_id = Some(id.to_owned());
+    }
+
+    let mut merged = live_ui.clone();
+    if let Some(object) = merged.as_object_mut() {
+        object.insert("pages".to_owned(), Value::Array(merged_pages));
+        object.insert("cached".to_owned(), Value::Bool(true));
+    }
+    merged
+}
+
 fn empty_workspace_ui() -> Value {
     json!({
         "pages": [],
@@ -472,22 +636,58 @@ fn empty_workspace_ui() -> Value {
     })
 }
 
-fn read_cached_workspace_catalog() -> CachedWorkspaceCatalog {
-    let cache = CACHED_WORKSPACE_CATALOG
-        .get_or_init(|| Mutex::new((None, CachedWorkspaceCatalog::default())));
-    if let Ok(cached) = cache.lock() {
-        if cached
-            .0
-            .is_some_and(|updated_at| updated_at.elapsed() < Duration::from_secs(30))
-        {
-            return cached.1.clone();
-        }
-    }
+fn latest_local_workspace_id(workspace_document: &Value) -> Option<String> {
+    workspace_document
+        .get("workspaces")
+        .and_then(Value::as_array)?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, workspace)| {
+            let id = workspace.get("id")?.as_str()?;
+            looks_like_uuid_value(id).then_some((
+                workspace
+                    .get("updatedAt")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MIN),
+                index,
+                id.to_owned(),
+            ))
+        })
+        .max_by_key(|(updated_at, index, _)| (*updated_at, *index))
+        .map(|(_, _, id)| id)
+}
 
-    let mut page_workspaces = HashMap::<String, String>::new();
-    let mut names = HashMap::<String, String>::new();
-    let mut node_sets = Vec::<Vec<Value>>::new();
-    let cache_files = std::env::var_os("LOCALAPPDATA")
+fn resolve_current_workspace_id(
+    webview_workspace_id: Option<String>,
+    workspace_document: &Value,
+) -> Option<String> {
+    webview_workspace_id.or_else(|| latest_local_workspace_id(workspace_document))
+}
+
+pub(crate) fn current_workspace_id() -> Option<String> {
+    let workspace_document = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .and_then(|root| fs::read_to_string(root.join("com.bezi.app").join("workspaces.json")).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_else(|| json!({}));
+    resolve_current_workspace_id(read_active_workspace_id(), &workspace_document)
+}
+
+fn read_cached_workspace_catalog() -> CachedWorkspaceCatalog {
+    let cache =
+        CACHED_WORKSPACE_CATALOG.get_or_init(|| Mutex::new(CachedWorkspaceCatalogCache::default()));
+    let Ok(mut cached) = cache.lock() else {
+        return CachedWorkspaceCatalog::default();
+    };
+    if cached
+        .checked_at
+        .is_some_and(|updated_at| updated_at.elapsed() < Duration::from_secs(1))
+    {
+        return cached.catalog.clone();
+    }
+    cached.checked_at = Some(Instant::now());
+
+    let cache_root = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|path| {
             path.join("com.bezi.app")
@@ -495,22 +695,109 @@ fn read_cached_workspace_catalog() -> CachedWorkspaceCatalog {
                 .join("Default")
                 .join("Cache")
                 .join("Cache_Data")
-        })
-        .and_then(|root| fs::read_dir(root).ok())
+        });
+    let Some(cache_root) = cache_root else {
+        return cached.catalog.clone();
+    };
+
+    let entries = fs::read_dir(cache_root)
+        .ok()
         .into_iter()
         .flatten()
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("data_"))
-        .filter_map(|entry| fs::read(entry.path()).ok());
-    for bytes in cache_files {
-        collect_cached_workspace_file(&bytes, &mut page_workspaces, &mut names, &mut node_sets);
-    }
-    let catalog = finish_cached_workspace_catalog(page_workspaces, names, node_sets);
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            Some((entry.path(), metadata.modified().ok(), metadata.len()))
+        })
+        .collect::<Vec<_>>();
+    let current_paths = entries
+        .iter()
+        .map(|(path, _, _)| path.clone())
+        .collect::<HashSet<_>>();
+    let mut changed = cached
+        .files
+        .keys()
+        .any(|path| !current_paths.contains(path));
+    cached.files.retain(|path, _| current_paths.contains(path));
 
-    if let Ok(mut cached) = cache.lock() {
-        *cached = (Some(Instant::now()), catalog.clone());
+    for (path, modified_at, length) in entries {
+        let unchanged = cached
+            .files
+            .get(&path)
+            .is_some_and(|file| file.modified_at == modified_at && file.length == length);
+        if unchanged {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let mut page_workspaces = HashMap::new();
+        let mut names = HashMap::new();
+        let mut node_sets = Vec::new();
+        collect_cached_workspace_file(&bytes, &mut page_workspaces, &mut names, &mut node_sets);
+        cached.files.insert(
+            path,
+            CachedWorkspaceFile {
+                modified_at,
+                length,
+                page_workspaces,
+                names,
+                node_sets,
+            },
+        );
+        changed = true;
     }
-    catalog
+
+    if changed {
+        let mut sources = cached.files.iter().collect::<Vec<_>>();
+        sources.sort_by(|(left_path, left), (right_path, right)| {
+            left.modified_at
+                .cmp(&right.modified_at)
+                .then_with(|| left.length.cmp(&right.length))
+                .then_with(|| left_path.cmp(right_path))
+        });
+        let mut page_workspaces = HashMap::new();
+        let mut names = HashMap::new();
+        let mut node_sets = Vec::new();
+        for (_, source) in sources {
+            page_workspaces.extend(source.page_workspaces.clone());
+            names.extend(source.names.clone());
+            node_sets.extend(source.node_sets.clone());
+        }
+        cached.catalog = finish_cached_workspace_catalog(page_workspaces, names, node_sets);
+    }
+    cached.catalog.clone()
+}
+
+fn retain_verified_workspace_pages(
+    catalog: &mut CachedWorkspaceCatalog,
+    active_workspace_id: Option<&str>,
+    live_ui: &Value,
+) {
+    let verified = VERIFIED_WORKSPACE_PAGES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut verified) = verified.lock() else {
+        return;
+    };
+    if live_ui.get("pagesComplete").and_then(Value::as_bool) == Some(true) {
+        if let Some(workspace_id) = active_workspace_id {
+            let mut verified_ui = live_ui.clone();
+            if let Some(object) = verified_ui.as_object_mut() {
+                object.insert("verified".to_owned(), Value::Bool(true));
+            }
+            verified.insert(workspace_id.to_owned(), verified_ui);
+        }
+    }
+    apply_verified_workspace_pages(catalog, &verified);
+}
+
+fn apply_verified_workspace_pages(
+    catalog: &mut CachedWorkspaceCatalog,
+    verified: &HashMap<String, Value>,
+) {
+    for (workspace_id, pages) in verified {
+        catalog.pages.insert(workspace_id.clone(), pages.clone());
+    }
 }
 
 #[cfg(test)]
@@ -839,7 +1126,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     memchr::memmem::find(haystack, needle)
 }
 
-fn read_active_workspace_id() -> Option<String> {
+pub(crate) fn read_active_workspace_id() -> Option<String> {
     let root = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)?
         .join("com.bezi.app")
@@ -1000,6 +1287,31 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_the_most_recent_local_workspace() {
+        let older = "11111111-1111-1111-1111-111111111111";
+        let newer = "22222222-2222-2222-2222-222222222222";
+        let workspace_document = json!({
+            "workspaces": [
+                { "id": older, "updatedAt": 10 },
+                { "id": newer, "updatedAt": 20 }
+            ]
+        });
+
+        assert_eq!(
+            latest_local_workspace_id(&workspace_document).as_deref(),
+            Some(newer)
+        );
+        assert_eq!(
+            resolve_current_workspace_id(None, &workspace_document).as_deref(),
+            Some(newer)
+        );
+        assert_eq!(
+            resolve_current_workspace_id(Some(older.to_owned()), &workspace_document).as_deref(),
+            Some(older)
+        );
+    }
+
+    #[test]
     fn extracts_cached_project_workspace_relationships() {
         let project_id = "30bf90d4-2593-4d75-b414-b4e5a9a7d662";
         let workspace_id = "e076ae2d-13e4-4fef-8a2c-7eba3ccb7fa4";
@@ -1117,6 +1429,351 @@ mod tests {
                     "depth": 0,
                     "expanded": false,
                     "remote": false
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn overlays_visible_state_without_dropping_the_complete_cached_tree() {
+        let cached = json!({
+            "pages": [
+                {
+                    "id": "folder",
+                    "title": "Design",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "cached-page",
+                    "title": "New page",
+                    "kind": "page",
+                    "depth": 1,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "other-folder",
+                    "title": "Other",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                }
+            ]
+        });
+        let live = json!({
+            "available": true,
+            "pages": [
+                {
+                    "id": "folder",
+                    "title": "Design docs",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": true,
+                    "remote": true
+                },
+                {
+                    "id": "live-only",
+                    "title": "Just created",
+                    "kind": "page",
+                    "depth": 1,
+                    "expanded": false,
+                    "remote": true
+                }
+            ],
+            "canvases": []
+        });
+
+        let merged = merge_active_workspace_ui(&live, Some(&cached));
+        assert_eq!(
+            merged.get("pages"),
+            Some(&json!([
+                {
+                    "id": "folder",
+                    "title": "Design docs",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": true,
+                    "remote": true
+                },
+                {
+                    "id": "cached-page",
+                    "title": "New page",
+                    "kind": "page",
+                    "depth": 1,
+                    "expanded": false,
+                    "remote": true
+                },
+                {
+                    "id": "live-only",
+                    "title": "Just created",
+                    "kind": "page",
+                    "depth": 1,
+                    "expanded": false,
+                    "remote": true
+                },
+                {
+                    "id": "other-folder",
+                    "title": "Other",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": true
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn keeps_cached_pages_that_are_outside_the_rendered_sidebar_slice() {
+        let cached = json!({
+            "pages": [
+                {
+                    "id": "offscreen-above",
+                    "title": "Above the viewport",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "visible-page",
+                    "title": "Visible old title",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "offscreen-below",
+                    "title": "Below the viewport",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                }
+            ]
+        });
+        let live = json!({
+            "available": true,
+            "pages": [
+                {
+                    "id": "visible-page",
+                    "title": "Visible new title",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false
+                }
+            ]
+        });
+
+        let merged = merge_active_workspace_ui(&live, Some(&cached));
+        let ids = merged["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|page| page["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["offscreen-above", "visible-page", "offscreen-below"]
+        );
+        assert_eq!(merged["pages"][1]["title"], "Visible new title");
+    }
+
+    #[test]
+    fn complete_live_page_scan_is_authoritative_for_deletions() {
+        let cached = json!({
+            "pages": [
+                {
+                    "id": "deleted-phase",
+                    "title": "Deleted phase",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "kept-page",
+                    "title": "Old title",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                }
+            ]
+        });
+        let live = json!({
+            "available": true,
+            "pagesComplete": true,
+            "pages": [
+                {
+                    "id": "kept-page",
+                    "title": "Current title",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false
+                }
+            ]
+        });
+
+        let merged = merge_active_workspace_ui(&live, Some(&cached));
+        assert_eq!(merged["pages"].as_array().unwrap().len(), 1);
+        assert_eq!(merged["pages"][0]["id"], "kept-page");
+        assert_eq!(merged["pages"][0]["title"], "Current title");
+    }
+
+    #[test]
+    fn verified_page_tree_replaces_the_stale_http_cache() {
+        let workspace_id = "cffd6a63-0ef8-4a7e-9ce5-d588cee6135f";
+        let mut catalog = CachedWorkspaceCatalog {
+            names: HashMap::new(),
+            pages: HashMap::from([(
+                workspace_id.to_owned(),
+                json!({ "pages": [{ "id": "deleted-phase" }] }),
+            )]),
+        };
+        apply_verified_workspace_pages(
+            &mut catalog,
+            &HashMap::from([(
+                workspace_id.to_owned(),
+                json!({ "pages": [{ "id": "current-page" }] }),
+            )]),
+        );
+
+        assert_eq!(
+            catalog.pages[workspace_id]["pages"][0]["id"],
+            "current-page"
+        );
+    }
+
+    #[test]
+    fn active_workspace_never_uses_unverified_http_pages() {
+        let stale = json!({ "pages": [{ "id": "deleted-phase" }], "cached": true });
+        let verified = json!({
+            "pages": [{ "id": "current-page" }],
+            "verified": true
+        });
+
+        assert!(verified_workspace_ui(Some(&stale)).is_none());
+        assert_eq!(
+            verified_workspace_ui(Some(&verified)).unwrap()["pages"][0]["id"],
+            "current-page"
+        );
+    }
+
+    #[test]
+    fn uses_the_complete_cached_catalog_for_deletes_moves_and_order() {
+        let cached = json!({
+            "pages": [
+                {
+                    "id": "root-page",
+                    "title": "Root page",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "kept-folder",
+                    "title": "Kept",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "hidden-page",
+                    "title": "Hidden child",
+                    "kind": "page",
+                    "depth": 1,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "moved-page",
+                    "title": "Moved page",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                },
+                {
+                    "id": "created-page",
+                    "title": "Just created",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": false
+                }
+            ]
+        });
+        let live = json!({
+            "available": true,
+            "pages": [
+                {
+                    "id": "root-page",
+                    "title": "Root page renamed",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false
+                },
+                {
+                    "id": "kept-folder",
+                    "title": "Kept",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": false
+                }
+            ]
+        });
+
+        let merged = merge_active_workspace_ui(&live, Some(&cached));
+        assert_eq!(
+            merged.get("pages"),
+            Some(&json!([
+                {
+                    "id": "root-page",
+                    "title": "Root page renamed",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": true
+                },
+                {
+                    "id": "kept-folder",
+                    "title": "Kept",
+                    "kind": "folder",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": true
+                },
+                {
+                    "id": "hidden-page",
+                    "title": "Hidden child",
+                    "kind": "page",
+                    "depth": 1,
+                    "expanded": false,
+                    "remote": true
+                },
+                {
+                    "id": "moved-page",
+                    "title": "Moved page",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": true
+                },
+                {
+                    "id": "created-page",
+                    "title": "Just created",
+                    "kind": "page",
+                    "depth": 0,
+                    "expanded": false,
+                    "remote": true
                 }
             ]))
         );

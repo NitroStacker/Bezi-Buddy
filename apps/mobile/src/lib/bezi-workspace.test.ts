@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   applyWorkspaceFolderState,
   parseWorkspaceItems,
+  toggleWorkspaceFolderOverride,
+  workspaceAncestorIds,
 } from "./bezi-workspace";
 
 describe("Bezi workspace items", () => {
@@ -113,5 +115,55 @@ describe("Bezi workspace items", () => {
       ["page-1", false],
       ["page-2", false],
     ]);
+  });
+
+  it("expands and collapses remote folders locally without waiting for desktop", () => {
+    const items = parseWorkspaceItems([
+      {
+        id: "folder-1",
+        title: "Design docs",
+        kind: "folder",
+        depth: 0,
+        expanded: false,
+        remote: true,
+      },
+      {
+        id: "page-1",
+        title: "Movement",
+        kind: "page",
+        depth: 1,
+        remote: true,
+      },
+    ]);
+    const expandedOverrides = toggleWorkspaceFolderOverride(items[0], {});
+    const expandedItems = applyWorkspaceFolderState(items, expandedOverrides);
+
+    expect(expandedItems.map((item) => item.id)).toEqual([
+      "folder-1",
+      "page-1",
+    ]);
+    expect(expandedItems[0].expanded).toBe(true);
+
+    const collapsedOverrides = toggleWorkspaceFolderOverride(
+      expandedItems[0],
+      expandedOverrides,
+    );
+    expect(
+      applyWorkspaceFolderState(items, collapsedOverrides).map(
+        (item) => item.id,
+      ),
+    ).toEqual(["folder-1"]);
+  });
+
+  it("finds the containing folders for a cached page", () => {
+    const items = parseWorkspaceItems([
+      { id: "root", title: "Root", kind: "folder", depth: 0 },
+      { id: "child", title: "Child", kind: "folder", depth: 1 },
+      { id: "page", title: "Page", kind: "page", depth: 2 },
+      { id: "other", title: "Other", kind: "page", depth: 0 },
+    ]);
+
+    expect(workspaceAncestorIds(items, "page")).toEqual(["root", "child"]);
+    expect(workspaceAncestorIds(items, "other")).toEqual([]);
   });
 });

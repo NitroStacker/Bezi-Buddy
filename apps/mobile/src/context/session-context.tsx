@@ -63,6 +63,10 @@ export function SessionProvider({ children }: PropsWithChildren) {
   const [lastPayload, setLastPayload] = useState<DecryptedPayload | null>(null);
   const [foregroundEpoch, setForegroundEpoch] = useState(0);
   const payloadListeners = useRef(new Set<PayloadListener>());
+  const hasControlRef = useRef(false);
+  const hasControl =
+    mobileDeviceId !== null && controllerDeviceId === mobileDeviceId;
+  hasControlRef.current = hasControl;
 
   useEffect(() => {
     if (selectedHostId) return;
@@ -210,6 +214,9 @@ export function SessionProvider({ children }: PropsWithChildren) {
       options: SendOptions = {},
     ): string | null => {
       if (!session.current) return null;
+      if ((options.kind ?? "control") === "control" && !hasControlRef.current) {
+        return null;
+      }
       try {
         const requestId = Crypto.randomUUID();
         const payload = decryptedPayloadSchema.parse({
@@ -240,8 +247,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
     () => ({
       connected: connectionPhase === "connected",
       capabilities,
-      hasControl:
-        mobileDeviceId !== null && controllerDeviceId === mobileDeviceId,
+      hasControl,
       lastPayload,
       send,
       subscribe,
@@ -263,9 +269,8 @@ export function SessionProvider({ children }: PropsWithChildren) {
     [
       capabilities,
       connectionPhase,
-      controllerDeviceId,
+      hasControl,
       lastPayload,
-      mobileDeviceId,
       send,
       subscribe,
     ],

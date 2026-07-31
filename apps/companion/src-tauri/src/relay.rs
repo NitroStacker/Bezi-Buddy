@@ -419,14 +419,31 @@ async fn dispatch_payload(
     }
 
     if message_type == "bezi.catalog.get" {
-        let result = tokio::task::spawn_blocking(bezi::workspace_snapshot_with_ui).await;
+        let complete_pages = body
+            .get("completePages")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let result =
+            tokio::task::spawn_blocking(move || bezi::workspace_snapshot_with_ui(complete_pages))
+                .await;
         return Some(match result {
-            Ok(workspace) => json!({
+            Ok(workspace)
+                if !complete_pages
+                    || workspace.pointer("/ui/pagesComplete").and_then(Value::as_bool)
+                        == Some(true) =>
+            {
+                json!({
                 "v": 1,
                 "requestId": request_id,
                 "type": "bezi.catalog",
                 "body": { "workspace": workspace }
-            }),
+                })
+            }
+            Ok(_) => bezi_error(
+                &request_id,
+                "page_scan_incomplete",
+                "Bezi could not inspect every page. Keep the desktop Pages section visible and try again.",
+            ),
             Err(error) => bezi_error(
                 &request_id,
                 "catalog_unavailable",
@@ -547,6 +564,92 @@ async fn dispatch_payload(
         }
     }
 
+    if message_type == "bezi.page.get" {
+        let page_id = body.get("pageId").and_then(Value::as_str)?.to_owned();
+        let ancestor_ids = body
+            .get("ancestorIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let result =
+            tokio::task::spawn_blocking(move || crate::bezi_ui::read_page(&page_id, &ancestor_ids))
+                .await
+                .map_err(|error| format!("Bezi page task failed: {error}"))
+                .and_then(|result| result);
+        return Some(match result {
+            Ok(page) => json!({
+                "v": 1,
+                "requestId": request_id,
+                "type": "bezi.page.content",
+                "body": page
+            }),
+            Err(error) => bezi_error(&request_id, "page_unavailable", &error),
+        });
+    }
+
+    if message_type == "bezi.workspace.activate" {
+        let workspace_id = body.get("workspaceId").and_then(Value::as_str)?.to_owned();
+        let label = body.get("label").and_then(Value::as_str)?.to_owned();
+        let response_workspace_id = workspace_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::bezi_ui::activate_workspace(&workspace_id, &label)
+        })
+        .await
+        .map_err(|error| format!("Bezi workspace task failed: {error}"))
+        .and_then(|result| result);
+        return Some(match result {
+            Ok(()) => json!({
+                "v": 1,
+                "requestId": request_id,
+                "type": "bezi.workspace.activated",
+                "body": { "workspaceId": response_workspace_id }
+            }),
+            Err(error) => bezi_error(&request_id, "ui_action_failed", &error),
+        });
+    }
+
+    if message_type == "bezi.thread.activate" {
+        let session_id = body.get("sessionId").and_then(Value::as_str)?.to_owned();
+        let thread_id = body
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let title = body.get("title").and_then(Value::as_str)?.to_owned();
+        let workspace_id = body
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let workspace_label = body
+            .get("workspaceLabel")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let response_session_id = session_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::bezi_ui::activate_thread(
+                &session_id,
+                thread_id.as_deref(),
+                &title,
+                workspace_id.as_deref(),
+                workspace_label.as_deref(),
+            )
+        })
+        .await
+        .map_err(|error| format!("Bezi thread task failed: {error}"))
+        .and_then(|result| result);
+        return Some(match result {
+            Ok(()) => json!({
+                "v": 1,
+                "requestId": request_id,
+                "type": "bezi.thread.activated",
+                "body": { "sessionId": response_session_id }
+            }),
+            Err(error) => bezi_error(&request_id, "ui_action_failed", &error),
+        });
+    }
+
     if message_type == "bezi.ui.activate" {
         if !control.is_armed() {
             return Some(bezi_error(
@@ -572,13 +675,6 @@ async fn dispatch_payload(
     }
 
     if message_type == "bezi.ui.folder.set" {
-        if !control.is_armed() {
-            return Some(bezi_error(
-                &request_id,
-                "control_disarmed",
-                "Hold Take Control before changing the Bezi desktop view.",
-            ));
-        }
         let item_id = body.get("itemId").and_then(Value::as_str)?.to_owned();
         let expanded = body.get("expanded").and_then(Value::as_bool)?;
         let response_item_id = item_id.clone();

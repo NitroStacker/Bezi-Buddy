@@ -23,12 +23,18 @@ describe("Bezi session history", () => {
         },
         {
           sessionId: "newer",
+          threadId: "thread-newer",
           cwd: "R:\\Game",
           title: "Newer thread",
           updatedAt: "2026-07-02T00:00:00Z",
         },
       ]).map((session) => session.id),
     ).toEqual(["newer", "older"]);
+    expect(
+      parseBeziSessions([
+        { sessionId: "newer", threadId: "thread-newer", title: "Newest" },
+      ])[0]?.threadId,
+    ).toBe("thread-newer");
   });
 
   it("keeps replayed messages separated by Bezi activity", () => {
@@ -106,6 +112,26 @@ describe("Bezi session history", () => {
     });
     expect(second).toHaveLength(1);
     expect(second[0].text).toBe("Hello world");
+  });
+
+  it("coalesces anonymous thought chunks in large replayed histories", () => {
+    const result = [
+      {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Inspecting " },
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "the canvas." },
+      },
+    ].reduce<BeziChatEntry[]>(reduceBeziSessionUpdate, []);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      role: "activity",
+      activityKind: "thought",
+      detail: "Inspecting the canvas.",
+    });
   });
 
   it("does not duplicate an optimistically rendered user prompt", () => {
@@ -196,6 +222,26 @@ describe("Bezi session history", () => {
       label: "Working",
       detail: "Edit Camera.cs",
       active: true,
+    });
+    expect(
+      statusFromBeziUpdate({
+        sessionUpdate: "session_info_update",
+        status: "cancelled",
+      }),
+    ).toEqual({
+      label: "Cancelled",
+      detail: "Stopped in Bezi",
+      active: false,
+    });
+    expect(
+      statusFromBeziUpdate({
+        type: "turn_ended",
+        stopReason: "aborted",
+      }),
+    ).toEqual({
+      label: "Stopped",
+      detail: "The Bezi turn ended early",
+      active: false,
     });
   });
 

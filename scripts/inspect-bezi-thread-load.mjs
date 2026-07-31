@@ -25,7 +25,8 @@ const sessions = Object.values(sessionCatalog.sessions ?? {})
   .sort((left, right) =>
     String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")),
   );
-const requestedProject = process.argv.slice(2).join(" ").trim().toLowerCase();
+const requestedProject = String(process.argv[2] ?? "").trim().toLowerCase();
+const requestedTitle = process.argv.slice(3).join(" ").trim().toLowerCase();
 const persistedSession =
   sessions.find(
     (entry) =>
@@ -103,6 +104,11 @@ const listedSessions = Array.isArray(liveListResponse?.result?.sessions)
   : [];
 const listedSession =
   listedSessions.find(
+    (entry) =>
+      requestedTitle &&
+      String(entry?.title ?? "").toLowerCase().includes(requestedTitle),
+  ) ??
+  listedSessions.find(
     (entry) => session.sessionId && entry?.sessionId === session.sessionId,
   ) ??
   [...listedSessions].sort((left, right) =>
@@ -148,6 +154,11 @@ const updateSummaries = updates.map((message) => {
       extractedTextLength(update.content) ||
       extractedTextLength(update.message) ||
       extractedTextLength(update.text),
+    textPreview:
+      extractedText(update.content)?.slice(0, 240) ||
+      extractedText(update.message)?.slice(0, 240) ||
+      extractedText(update.text)?.slice(0, 240) ||
+      null,
     tool:
       update.sessionUpdate === "tool_call"
         ? {
@@ -216,6 +227,10 @@ process.stdout.write(
       updateCount: updates.length,
       kinds,
       sampleUpdates: updateSummaries.slice(0, 50),
+      largestTextUpdates: [...updateSummaries]
+        .sort((left, right) => right.textLength - left.textLength)
+        .slice(0, 12),
+      lastUpdates: updateSummaries.slice(-20),
     },
     null,
     2,
@@ -243,6 +258,17 @@ function record(value) {
 
 function string(value) {
   return typeof value === "string" ? value : null;
+}
+
+function extractedText(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(extractedText).filter(Boolean).join("\n") || null;
+  }
+  const item = record(value);
+  if (typeof item.text === "string") return item.text;
+  if (item.content !== undefined) return extractedText(item.content);
+  return null;
 }
 
 function shape(value) {

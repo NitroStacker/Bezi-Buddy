@@ -79,8 +79,8 @@ pub async fn create_pairing(
     let pairing_id = Uuid::new_v4().to_string();
     let claim_code = random_secret();
     let pair_secret = random_secret();
-    let expires_at = (Utc::now() + Duration::minutes(5))
-        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    let expires_at =
+        (Utc::now() + Duration::minutes(5)).to_rfc3339_opts(SecondsFormat::Millis, true);
     let host_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_owned());
     let code_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(claim_code.as_bytes()));
 

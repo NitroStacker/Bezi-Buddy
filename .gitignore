@@ -14,7 +14,10 @@ coverage/
 
 # Rust / Tauri
 target/
+apps/companion/src-tauri/target-*/
 apps/companion/src-tauri/gen/
+tools/windows-launcher/bin/
+tools/windows-launcher/obj/
 
 # Unity generated folders
 Library/

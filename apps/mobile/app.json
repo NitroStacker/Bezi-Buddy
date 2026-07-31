@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Bezi Remote",
+    "name": "Bezi Buddy",
     "slug": "bezi-remote",
     "version": "0.1.0",
     "icon": "./assets/icon.png",
@@ -12,14 +12,14 @@
       "supportsTablet": true,
       "bundleIdentifier": "app.beziremote.mobile",
       "infoPlist": {
-        "NSCameraUsageDescription": "Scan the private QR code displayed by your Bezi Remote companion to pair this iPhone with your PC."
+        "NSCameraUsageDescription": "Scan the private QR code displayed by your Bezi companion to pair this iPhone with your PC."
       }
     },
     "android": {
       "package": "app.beziremote.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
-        "backgroundColor": "#1B1A1A"
+        "backgroundColor": "#1B1A19"
       }
     },
     "plugins": [
@@ -28,7 +28,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Bezi Remote to scan a pairing QR code from your PC."
+          "cameraPermission": "Allow Bezi Buddy to scan a pairing QR code from your PC."
         }
       ]
     ],

@@ -224,9 +224,7 @@ impl SessionCrypto {
             }
         }
         let window = self.inbound_windows.entry(prefix).or_default();
-        let highest = window
-            .highest
-            .map_or(sequence, |value| value.max(sequence));
+        let highest = window.highest.map_or(sequence, |value| value.max(sequence));
         window.highest = Some(highest);
         window.seen.insert(sequence);
         if highest >= REPLAY_WINDOW {
@@ -327,10 +325,7 @@ mod tests {
             .unwrap();
         assert_eq!(reconnected.seq, 0);
         assert_eq!(host.decrypt(&reconnected).unwrap()["connection"], 2);
-        assert!(host
-            .decrypt(&reconnected)
-            .unwrap_err()
-            .contains("replayed"));
+        assert!(host.decrypt(&reconnected).unwrap_err().contains("replayed"));
     }
 
     #[test]

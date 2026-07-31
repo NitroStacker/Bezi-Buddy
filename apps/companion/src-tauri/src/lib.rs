@@ -121,6 +121,8 @@ pub fn run() {
             disarm_control
         ])
         .setup(move |app| {
+            let start_hidden = std::env::var("BEZI_REMOTE_START_HIDDEN")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
             let show = MenuItem::with_id(app, "show", "Open Companion", true, None::<&str>)?;
             let disarm =
                 MenuItem::with_id(app, "disarm", "Disarm Remote Control", true, None::<&str>)?;
@@ -143,6 +145,13 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            if !start_hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                    window.set_focus()?;
+                }
+            }
 
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = unity_bridge::run_pipe_server(unity_registry).await {

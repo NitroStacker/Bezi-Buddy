@@ -17,6 +17,9 @@ import {
   ActivityIndicator,
   Animated,
   AppState,
+  FlatList,
+  Image,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -27,7 +30,10 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import { BeziMarkdown } from "@/components/bezi-markdown";
 import { ActionButton, Card } from "@/components/primitives";
 import { RemoteSurface } from "@/components/remote-surface";
@@ -39,6 +45,16 @@ import {
   reduceBeziLaunchState,
   type BeziLaunchState,
 } from "@/lib/bezi-launch-flow";
+import {
+  explicitThreadSelection,
+  explicitWorkspaceSelection,
+} from "@/lib/bezi-desktop-selection";
+import {
+  initialBeziPageSyncState,
+  reduceBeziPageSyncState,
+  shouldBlockForPageSync,
+  type BeziPageSyncState,
+} from "@/lib/bezi-page-sync";
 import {
   areBeziHistoriesEqual,
   buildBeziLineDiff,
@@ -56,7 +72,9 @@ import {
 import {
   applyWorkspaceFolderState,
   parseWorkspaceItems,
+  toggleWorkspaceFolderOverride,
   type WorkspaceItem,
+  workspaceAncestorIds,
 } from "@/lib/bezi-workspace";
 import { colors, radius, spacing, typography } from "@/theme/tokens";
 
@@ -98,6 +116,14 @@ type RemotePermission = {
 
 type AdvertisedChoice = { id: string; name: string };
 
+type PageDocument = {
+  item: WorkspaceItem;
+  title: string;
+  markdown: string | null;
+  truncated: boolean;
+  error: string | null;
+};
+
 const DRAWER_DESTINATIONS: {
   id: BeziDestination;
   label: string;
@@ -112,6 +138,7 @@ const DRAWER_DESTINATIONS: {
 ];
 
 export default function BeziMobileScreen() {
+  const insets = useSafeAreaInsets();
   const {
     connected,
     capabilities,
@@ -124,6 +151,10 @@ export default function BeziMobileScreen() {
   const [launchState, dispatchLaunch] = useReducer(
     reduceBeziLaunchState,
     initialBeziLaunchState,
+  );
+  const [pageSyncState, dispatchPageSync] = useReducer(
+    reduceBeziPageSyncState,
+    initialBeziPageSyncState,
   );
   const [destination, setDestination] = useState<BeziDestination>("threads");
   const [composer, setComposer] = useState("");
@@ -141,9 +172,10 @@ export default function BeziMobileScreen() {
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedDiff, setSelectedDiff] = useState<BeziDiffFile | null>(null);
+  const [selectedPage, setSelectedPage] = useState<PageDocument | null>(null);
   const [remoteTitle, setRemoteTitle] = useState("Full Remote");
   const [sessionBusy, setSessionBusy] = useState(false);
-  const [folderBusyId, setFolderBusyId] = useState<string | null>(null);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [folderExpansionOverrides, setFolderExpansionOverrides] = useState<
     Record<string, boolean>
   >({});
@@ -156,11 +188,16 @@ export default function BeziMobileScreen() {
     model?: string;
   }>({ modes: [], models: [] });
   const newRequest = useRef<string | null>(null);
+  const pendingNewThread = useRef(false);
   const promptRequest = useRef<string | null>(null);
+  const promptDraft = useRef<string | null>(null);
   const loadRequest = useRef<string | null>(null);
   const listRequest = useRef<string | null>(null);
   const catalogRequest = useRef<string | null>(null);
-  const folderRequest = useRef<string | null>(null);
+  const catalogTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCompleteCatalogRequestAt = useRef(0);
+  const pageSyncPending = useRef(false);
+  const pageRequest = useRef<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const activeSessionRef = useRef<BeziSession | null>(null);
   const activeSessionUpdatedAt = useRef<string | null>(null);
@@ -171,12 +208,83 @@ export default function BeziMobileScreen() {
   const replayClearsOnEmpty = useRef(false);
   const messagesRef = useRef<ChatEntry[]>([]);
   const agentStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const timelineRef = useRef<ScrollView>(null);
+  const timelineRef = useRef<FlatList<ChatEntry>>(null);
   const timelinePinned = useRef(true);
   const previousDesktopWorkspaceId = useRef<string | null>(null);
   const previousDesktopProjectId = useRef<string | null>(null);
   const launchStateRef = useRef(launchState);
   const remoteStream = useRemoteStream("bezi");
+  const armCatalogTimeout = useCallback((requestId: string) => {
+    if (catalogTimeout.current) clearTimeout(catalogTimeout.current);
+    catalogTimeout.current = setTimeout(() => {
+      if (catalogRequest.current !== requestId) return;
+      catalogRequest.current = null;
+      catalogTimeout.current = null;
+      if (pageSyncPending.current) {
+        pageSyncPending.current = false;
+        dispatchPageSync({
+          type: "failed",
+          message: "Page refresh timed out. The last synced pages are still available.",
+        });
+      }
+    }, 12_000);
+  }, []);
+  const startPageSync = useCallback(() => {
+    setFolderExpansionOverrides({});
+    dispatchPageSync({ type: "started" });
+    pageSyncPending.current = true;
+    if (!connected) {
+      pageSyncPending.current = false;
+      dispatchPageSync({
+        type: "failed",
+        message: "Reconnect Bezi Buddy to sync the latest pages.",
+      });
+      return;
+    }
+    const requestId = send(
+      "bezi.catalog.get",
+      { completePages: true },
+      { kind: "signaling" },
+    );
+    if (!requestId) {
+      pageSyncPending.current = false;
+      dispatchPageSync({
+        type: "failed",
+        message: "Bezi Buddy could not start the page sync.",
+      });
+      return;
+    }
+    catalogRequest.current = requestId;
+    armCatalogTimeout(requestId);
+  }, [armCatalogTimeout, connected, send]);
+
+  useEffect(
+    () => () => {
+      if (catalogTimeout.current) clearTimeout(catalogTimeout.current);
+    },
+    [],
+  );
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const showSubscription = Keyboard.addListener(showEvent, () => {
+      setKeyboardVisible(true);
+      timelinePinned.current = true;
+      requestAnimationFrame(() => {
+        timelineRef.current?.scrollToEnd({ animated: true });
+      });
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      setKeyboardVisible(false);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
   const showAgentStatus = useCallback((status: BeziAgentStatus | null) => {
     if (agentStatusTimer.current) {
       clearTimeout(agentStatusTimer.current);
@@ -304,6 +412,7 @@ export default function BeziMobileScreen() {
       replayBuffer.current = null;
       replayClearsOnEmpty.current = false;
       newRequest.current = null;
+      pendingNewThread.current = false;
       promptRequest.current = null;
       loadRequest.current = null;
       showAgentStatus(null);
@@ -311,8 +420,19 @@ export default function BeziMobileScreen() {
       setSessionBusy(false);
       listRequest.current = null;
       catalogRequest.current = null;
-      folderRequest.current = null;
-      setFolderBusyId(null);
+      if (catalogTimeout.current) {
+        clearTimeout(catalogTimeout.current);
+        catalogTimeout.current = null;
+      }
+      if (pageSyncPending.current) {
+        pageSyncPending.current = false;
+        dispatchPageSync({
+          type: "failed",
+          message: "The page sync stopped because Bezi Buddy disconnected.",
+        });
+      }
+      pageRequest.current = null;
+      setSelectedPage(null);
     }
   }, [connected, showAgentStatus]);
 
@@ -345,26 +465,58 @@ export default function BeziMobileScreen() {
   useEffect(() => {
     const shouldLoadCatalog =
       launchState.phase === "loading-workspaces" || launchState.phase === "ready";
-    if (!connected || !shouldLoadCatalog) return;
+    if (!connected || !shouldLoadCatalog || destination === "pages") return;
     const refresh = () => {
       if (catalogRequest.current) return;
-      catalogRequest.current = send(
+      const completePages =
+        Date.now() - lastCompleteCatalogRequestAt.current >= 60_000;
+      const requestId = send(
         "bezi.catalog.get",
-        {},
+        completePages ? { completePages: true } : {},
         { kind: "signaling" },
       );
+      if (!requestId) return;
+      catalogRequest.current = requestId;
+      if (completePages) lastCompleteCatalogRequestAt.current = Date.now();
+      armCatalogTimeout(requestId);
     };
     refresh();
-    const timer = setInterval(refresh, 5_000);
+    const timer = setInterval(refresh, 3_000);
     const appState = AppState.addEventListener("change", (state) => {
       if (state === "active") refresh();
     });
     return () => {
       clearInterval(timer);
       appState.remove();
-      catalogRequest.current = null;
     };
-  }, [connected, launchState.phase, send]);
+  }, [armCatalogTimeout, connected, destination, launchState.phase, send]);
+
+  useEffect(() => {
+    const pageId = selectedPage?.item.id;
+    if (!connected || !pageId) return;
+    const refresh = () => {
+      if (pageRequest.current) return;
+      pageRequest.current = send(
+        "bezi.page.get",
+        {
+          pageId,
+          ancestorIds: workspaceAncestorIds(
+            selectedWorkspace?.pages ?? [],
+            pageId,
+          ),
+        },
+        { kind: "signaling" },
+      );
+    };
+    const timer = setInterval(refresh, 3_000);
+    const appState = AppState.addEventListener("change", (state) => {
+      if (state === "active") refresh();
+    });
+    return () => {
+      clearInterval(timer);
+      appState.remove();
+    };
+  }, [connected, selectedPage?.item.id, selectedWorkspace?.pages, send]);
 
   useEffect(() => {
     if (
@@ -442,11 +594,19 @@ export default function BeziMobileScreen() {
         if (!payload.type.startsWith("bezi.")) return;
         if (
           payload.type === "bezi.catalog" &&
-          (!catalogRequest.current || payload.requestId === catalogRequest.current)
+          payload.requestId === catalogRequest.current
         ) {
           catalogRequest.current = null;
+          if (catalogTimeout.current) {
+            clearTimeout(catalogTimeout.current);
+            catalogTimeout.current = null;
+          }
           const nextCatalog = asRecord(payload.body.workspace);
           setCatalog(nextCatalog);
+          if (pageSyncPending.current) {
+            pageSyncPending.current = false;
+            dispatchPageSync({ type: "completed" });
+          }
           if (launchStateRef.current.phase === "loading-workspaces") {
             const nextWorkspace = parseWorkspace(capabilities?.body, nextCatalog);
             if (nextWorkspace.workspaces.length === 0) {
@@ -462,15 +622,22 @@ export default function BeziMobileScreen() {
           return;
         }
         if (
-          payload.type === "bezi.ui.folder.changed" &&
-          payload.requestId === folderRequest.current
+          payload.type === "bezi.page.content" &&
+          payload.requestId === pageRequest.current
         ) {
-          folderRequest.current = null;
-          setFolderBusyId(null);
-          catalogRequest.current = send(
-            "bezi.catalog.get",
-            {},
-            { kind: "signaling" },
+          pageRequest.current = null;
+          const markdown = stringValue(payload.body.markdown);
+          const title = stringValue(payload.body.title);
+          setSelectedPage((current) =>
+            current
+              ? {
+                  ...current,
+                  title: title ?? current.title,
+                  markdown: markdown ?? "",
+                  truncated: payload.body.truncated === true,
+                  error: null,
+                }
+              : current,
           );
           return;
         }
@@ -479,10 +646,25 @@ export default function BeziMobileScreen() {
         if (payload.type === "bezi.error") {
           const catalogFailed = payload.requestId === catalogRequest.current;
           const listFailed = payload.requestId === listRequest.current;
+          const newFailed = payload.requestId === newRequest.current;
+          const promptFailed = payload.requestId === promptRequest.current;
           const loadFailed = payload.requestId === loadRequest.current;
-          const folderFailed = payload.requestId === folderRequest.current;
+          const pageFailed = payload.requestId === pageRequest.current;
           if (catalogFailed) {
             catalogRequest.current = null;
+            if (catalogTimeout.current) {
+              clearTimeout(catalogTimeout.current);
+              catalogTimeout.current = null;
+            }
+            if (pageSyncPending.current) {
+              pageSyncPending.current = false;
+              dispatchPageSync({
+                type: "failed",
+                message:
+                  stringValue(payload.body.message) ??
+                  "Bezi Buddy could not sync the latest pages.",
+              });
+            }
           }
           if (listFailed) {
             listRequest.current = null;
@@ -493,12 +675,38 @@ export default function BeziMobileScreen() {
             replayBuffer.current = null;
             replayClearsOnEmpty.current = false;
           }
-          if (folderFailed) {
-            folderRequest.current = null;
-            setFolderBusyId(null);
+          if (newFailed) {
+            newRequest.current = null;
+            pendingNewThread.current = false;
+          }
+          if (promptFailed) {
+            const failedRequestId = promptRequest.current;
+            const failedDraft = promptDraft.current;
+            promptRequest.current = null;
+            promptDraft.current = null;
+            showAgentStatus(null);
+            setMessages((current) =>
+              current.filter((entry) => entry.id !== failedRequestId),
+            );
+            if (failedDraft) {
+              setComposer((current) => current || failedDraft);
+            }
+          }
+          if (pageFailed) {
+            pageRequest.current = null;
+            setSelectedPage((current) =>
+              current
+                ? {
+                    ...current,
+                    error:
+                      stringValue(payload.body.message) ??
+                      "Bezi could not open this page.",
+                  }
+                : current,
+            );
           }
           setSessionBusy(false);
-          if (folderFailed) return;
+          if (pageFailed) return;
           const message =
             stringValue(payload.body.message) ?? "Bezi rejected the request.";
           if (launchStateRef.current.phase !== "ready") {
@@ -730,8 +938,24 @@ export default function BeziMobileScreen() {
         }
 
         if (payload.requestId === promptRequest.current) {
+          const completedRequestId = promptRequest.current;
+          const completedDraft = promptDraft.current;
           promptRequest.current = null;
+          promptDraft.current = null;
           showAgentStatus(null);
+          if (envelope.error) {
+            const promptError = asRecord(envelope.error);
+            setMessages((current) =>
+              current.filter((entry) => entry.id !== completedRequestId),
+            );
+            if (completedDraft) {
+              setComposer((current) => current || completedDraft);
+            }
+            setError(
+              stringValue(promptError?.message) ??
+                "Bezi could not send this message.",
+            );
+          }
           return;
         }
 
@@ -793,6 +1017,12 @@ export default function BeziMobileScreen() {
         if (sessionId && expectedSessionId && sessionId !== expectedSessionId) return;
         const updateKind =
           stringValue(update.sessionUpdate) ?? stringValue(update.type);
+        const updateStatus = statusFromBeziUpdate(update);
+        if (updateStatus && !updateStatus.active) {
+          promptRequest.current = null;
+          setSessionBusy(false);
+          showAgentStatus(updateStatus);
+        }
         if (updateKind === "session_info_update" && sessionId) {
           const title = stringValue(update.title);
           const updatedAt = stringValue(update.updatedAt);
@@ -825,8 +1055,7 @@ export default function BeziMobileScreen() {
           );
         } else {
           lastActiveEventAt.current = Date.now();
-          const status = statusFromBeziUpdate(update);
-          if (status) showAgentStatus(status);
+          if (updateStatus) showAgentStatus(updateStatus);
           setMessages((current) => reduceBeziSessionUpdate(current, update));
         }
       }),
@@ -840,17 +1069,52 @@ export default function BeziMobileScreen() {
     ],
   );
 
-  const startThread = () => {
-    if (!selectedProject || !hasControl || sessionBusy) return;
-    setSessionBusy(true);
-    setError(null);
-    newRequest.current = send("bezi.session.new", {
+  const startThread = useCallback(() => {
+    if (!connected || !selectedProject || newRequest.current) return;
+    if (!hasControl) {
+      pendingNewThread.current = true;
+      setError(null);
+      setDrawerOpen(false);
+      takeControl(30);
+      return;
+    }
+    const requestId = send("bezi.session.new", {
       cwd: selectedProject.path,
       mcpServers: [],
     });
+    if (!requestId) {
+      setError("Bezi could not start a new thread.");
+      return;
+    }
+    pendingNewThread.current = false;
+    loadRequest.current = null;
+    pendingLoadSessionId.current = null;
+    replayBuffer.current = null;
+    replayClearsOnEmpty.current = false;
+    activeSessionIdRef.current = null;
+    activeSessionRef.current = null;
+    activeSessionUpdatedAt.current = null;
+    setActiveSessionId(null);
+    messagesRef.current = [];
+    setMessages([]);
+    showAgentStatus(null);
+    setError(null);
+    setSessionBusy(true);
+    newRequest.current = requestId;
     setDestination("threads");
     setDrawerOpen(false);
-  };
+  }, [
+    connected,
+    hasControl,
+    selectedProject,
+    send,
+    showAgentStatus,
+    takeControl,
+  ]);
+
+  useEffect(() => {
+    if (hasControl && pendingNewThread.current) startThread();
+  }, [hasControl, startThread]);
 
   const selectSession = (session: BeziSession) => {
     setDestination("threads");
@@ -867,6 +1131,12 @@ export default function BeziMobileScreen() {
     showAgentStatus(null);
     if (session.workspaceId) setSelectedWorkspaceId(session.workspaceId);
     if (session.projectId) setSelectedProjectId(session.projectId);
+    const desktopSelection = explicitThreadSelection(
+      session,
+      workspace.workspaces.find((candidate) => candidate.id === session.workspaceId)
+        ?.label ?? null,
+    );
+    send(desktopSelection.type, desktopSelection.body, { kind: "signaling" });
     openSession(
       session,
       send,
@@ -881,20 +1151,56 @@ export default function BeziMobileScreen() {
     setDrawerOpen(false);
   };
 
+  const dispatchPrompt = useCallback(
+    (pending: { sessionId: string; text: string }) => {
+      if (
+        !connected ||
+        promptRequest.current ||
+        activeSessionIdRef.current !== pending.sessionId
+      ) {
+        setError(
+          activeSessionIdRef.current !== pending.sessionId
+            ? "The selected thread changed before the message could be sent."
+            : "Bezi is already handling a message.",
+        );
+        return false;
+      }
+
+      const requestId = send(
+        "bezi.session.prompt",
+        {
+          sessionId: pending.sessionId,
+          text: pending.text,
+          attachments: [],
+        },
+        { kind: "signaling" },
+      );
+      if (!requestId) {
+        setError("Bezi could not send this message. Try again.");
+        return false;
+      }
+
+      promptRequest.current = requestId;
+      promptDraft.current = pending.text;
+      setError(null);
+      showAgentStatus({ label: "Thinking", active: true });
+      setMessages((current) => [
+        ...current,
+        { id: requestId, role: "user", text: pending.text },
+      ]);
+      setComposer((current) =>
+        current.trim() === pending.text ? "" : current,
+      );
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      return true;
+    },
+    [connected, send, showAgentStatus],
+  );
+
   const submitPrompt = () => {
     const text = composer.trim();
     if (!text || !connected || !activeSessionId) return;
-    const requestId = send("bezi.session.prompt", {
-      sessionId: activeSessionId,
-      text,
-      attachments: [],
-    });
-    if (!requestId) return;
-    promptRequest.current = requestId;
-    showAgentStatus({ label: "Thinking", active: true });
-    setMessages((current) => [...current, { id: requestId, role: "user", text }]);
-    setComposer("");
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    dispatchPrompt({ sessionId: activeSessionId, text });
   };
 
   const selectChoice = (kind: "mode" | "model", choice: AdvertisedChoice) => {
@@ -909,6 +1215,36 @@ export default function BeziMobileScreen() {
   };
 
   const openWorkspaceItem = (item: WorkspaceItem) => {
+    if (item.kind === "page" && !item.id.startsWith("nav:")) {
+      setSelectedPage({
+        item,
+        title: decodeHtml(item.title),
+        markdown: null,
+        truncated: false,
+        error: null,
+      });
+      const requestId = send(
+        "bezi.page.get",
+        {
+          pageId: item.id,
+          ancestorIds: workspaceAncestorIds(
+            selectedWorkspace?.pages ?? [],
+            item.id,
+          ),
+        },
+        { kind: "signaling" },
+      );
+      pageRequest.current = requestId;
+      if (!requestId) {
+        setSelectedPage((current) =>
+          current
+            ? { ...current, error: "Bezi could not open this page." }
+            : current,
+        );
+      }
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      return;
+    }
     if (!hasControl) return;
     send("bezi.ui.activate", { itemId: item.id });
     setRemoteTitle(decodeHtml(item.title));
@@ -917,31 +1253,18 @@ export default function BeziMobileScreen() {
   };
 
   const toggleWorkspaceFolder = (item: WorkspaceItem) => {
-    if (item.kind !== "folder" || folderRequest.current) {
-      return;
-    }
-    if (!item.remote) {
-      setFolderExpansionOverrides((current) => ({
-        ...current,
-        [item.id]: !item.expanded,
-      }));
-      void Haptics.selectionAsync();
-      return;
-    }
-    if (!hasControl) return;
-    const requestId = send("bezi.ui.folder.set", {
-      itemId: item.id,
-      expanded: !item.expanded,
-    });
-    if (!requestId) return;
-    folderRequest.current = requestId;
-    setFolderBusyId(item.id);
+    if (item.kind !== "folder") return;
+    setFolderExpansionOverrides((current) =>
+      toggleWorkspaceFolderOverride(item, current),
+    );
     void Haptics.selectionAsync();
   };
 
   const chooseLaunchWorkspace = (candidate: BeziWorkspace) => {
     setSelectedWorkspaceId(candidate.id);
     setSelectedProjectId(null);
+    const desktopSelection = explicitWorkspaceSelection(candidate);
+    send(desktopSelection.type, desktopSelection.body, { kind: "signaling" });
     dispatchLaunch({
       type: "choose-workspace",
       workspaceId: candidate.id,
@@ -989,13 +1312,16 @@ export default function BeziMobileScreen() {
     );
   }
 
-  const createDisabled = !connected || !hasControl || !selectedProject;
+  const createDisabled = !connected || !selectedProject;
   const sendDisabled =
-    !composer.trim() || !connected || !activeSessionId;
+    !composer.trim() ||
+    !connected ||
+    !activeSessionId ||
+    Boolean(promptRequest.current);
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
       keyboardVerticalOffset={0}
       style={styles.flex}
     >
@@ -1044,13 +1370,123 @@ export default function BeziMobileScreen() {
               </View>
             ) : null}
 
-            <ScrollView
+            <FlatList
               contentContainerStyle={styles.timeline}
+              data={messages}
+              initialNumToRender={10}
+              keyExtractor={(entry, index) => `${entry.role}-${entry.id}-${index}`}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
+              ListEmptyComponent={
+                !connected ? (
+                  <EmptyState
+                    copy="Connect the Windows companion to see the real threads and projects from Bezi."
+                    icon="desktop-tower-monitor"
+                    title="Your Bezi workspace is offline"
+                  />
+                ) : !activeSessionId ? (
+                  <EmptyState
+                    copy="Choose a project from the menu, take control, and create a thread."
+                    icon="message-plus-outline"
+                    title="Start a thread"
+                  />
+                ) : (
+                  <EmptyState
+                    copy="Prompt Bezi below. Responses, plans, tools, diffs, and approvals appear here."
+                    icon="message-processing-outline"
+                    title={sessionBusy ? "Loading thread…" : "What are we building?"}
+                  />
+                )
+              }
+              ListFooterComponent={
+                <>
+                  {agentStatus ? (
+                    <View
+                      accessibilityLabel={[
+                        `Bezi is ${agentStatus.label.toLowerCase()}`,
+                        agentStatus.detail,
+                      ]
+                        .filter(Boolean)
+                        .join(". ")}
+                      accessibilityLiveRegion="polite"
+                      style={styles.agentStatus}
+                    >
+                      <View style={styles.agentStatusIndicator}>
+                        {agentStatus.active ? (
+                          <ActivityIndicator
+                            color={colors.primaryStrong}
+                            size="small"
+                          />
+                        ) : (
+                          <MaterialCommunityIcons
+                            color={colors.live}
+                            name="check"
+                            size={15}
+                          />
+                        )}
+                      </View>
+                      <View style={styles.grow}>
+                        <Text style={styles.agentStatusLabel}>
+                          {agentStatus.label}
+                          {agentStatus.active ? "…" : ""}
+                        </Text>
+                        {agentStatus.detail ? (
+                          <Text numberOfLines={1} style={styles.agentStatusDetail}>
+                            {agentStatus.detail}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <View style={styles.agentStatusLive}>
+                        <View style={styles.agentStatusDot} />
+                        <Text style={styles.agentStatusLiveText}>LIVE</Text>
+                      </View>
+                    </View>
+                  ) : null}
+
+                  {permission ? (
+                    <Card elevated style={styles.permissionCard}>
+                      <View style={styles.row}>
+                        <View style={styles.permissionIcon}>
+                          <MaterialCommunityIcons
+                            color={colors.warning}
+                            name="shield-key-outline"
+                            size={20}
+                          />
+                        </View>
+                        <View style={styles.grow}>
+                          <Text style={styles.cardTitle}>Approval requested</Text>
+                          <Text style={styles.cardMeta}>{permission.title}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.permissionActions}>
+                        {permission.options.map((option) => (
+                          <ActionButton
+                            key={option.optionId}
+                            label={option.name}
+                            onPress={() => {
+                              send("bezi.permission.resolve", {
+                                acpRequestId: permission.requestId,
+                                option: option.optionId,
+                              });
+                              setPermission(null);
+                            }}
+                            style={styles.grow}
+                            variant={
+                              option.kind?.includes("reject")
+                                ? "ghost"
+                                : "primary"
+                            }
+                          />
+                        ))}
+                      </View>
+                    </Card>
+                  ) : null}
+                </>
+              }
+              maxToRenderPerBatch={8}
               onContentSizeChange={() => {
                 if (timelinePinned.current) {
-                  timelineRef.current?.scrollToEnd({ animated: true });
+                  timelineRef.current?.scrollToEnd({ animated: false });
                 }
               }}
               onScroll={({ nativeEvent }) => {
@@ -1060,124 +1496,44 @@ export default function BeziMobileScreen() {
                   nativeEvent.contentOffset.y;
                 timelinePinned.current = distanceFromEnd < 96;
               }}
+              onScrollBeginDrag={() => {
+                timelinePinned.current = false;
+              }}
               ref={timelineRef}
+              removeClippedSubviews={Platform.OS === "android"}
+              renderItem={({ item }) => (
+                <MessageCard entry={item} onOpenDiff={setSelectedDiff} />
+              )}
               scrollEventThrottle={100}
               showsVerticalScrollIndicator={false}
               style={styles.timelineScroll}
+              windowSize={7}
+            />
+
+            <View
+              style={[
+                styles.composerDock,
+                {
+                  paddingBottom: keyboardVisible
+                    ? Math.max(insets.bottom, spacing.md)
+                    : Platform.OS === "ios"
+                      ? 96
+                      : 78,
+                },
+              ]}
             >
-              {!connected ? (
-                <EmptyState
-                  copy="Connect the Windows companion to see the real threads and projects from Bezi."
-                  icon="desktop-tower-monitor"
-                  title="Your Bezi workspace is offline"
-                />
-              ) : !activeSessionId ? (
-                <EmptyState
-                  copy="Choose a project from the menu, take control, and create a thread."
-                  icon="message-plus-outline"
-                  title="Start a thread"
-                />
-              ) : messages.length === 0 ? (
-                <EmptyState
-                  copy="Prompt Bezi below. Responses, plans, tools, diffs, and approvals appear here."
-                  icon="message-processing-outline"
-                  title={sessionBusy ? "Loading thread…" : "What are we building?"}
-                />
-              ) : (
-                messages.map((entry) => (
-                  <MessageCard
-                    entry={entry}
-                    key={entry.id}
-                    onOpenDiff={setSelectedDiff}
-                  />
-                ))
-              )}
-
-              {agentStatus ? (
-                <View
-                  accessibilityLabel={[
-                    `Bezi is ${agentStatus.label.toLowerCase()}`,
-                    agentStatus.detail,
-                  ]
-                    .filter(Boolean)
-                    .join(". ")}
-                  accessibilityLiveRegion="polite"
-                  style={styles.agentStatus}
-                >
-                  <View style={styles.agentStatusIndicator}>
-                    {agentStatus.active ? (
-                      <ActivityIndicator color={colors.primaryStrong} size="small" />
-                    ) : (
-                      <MaterialCommunityIcons
-                        color={colors.live}
-                        name="check"
-                        size={15}
-                      />
-                    )}
-                  </View>
-                  <View style={styles.grow}>
-                    <Text style={styles.agentStatusLabel}>
-                      {agentStatus.label}
-                      {agentStatus.active ? "…" : ""}
-                    </Text>
-                    {agentStatus.detail ? (
-                      <Text numberOfLines={1} style={styles.agentStatusDetail}>
-                        {agentStatus.detail}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <View style={styles.agentStatusLive}>
-                    <View style={styles.agentStatusDot} />
-                    <Text style={styles.agentStatusLiveText}>LIVE</Text>
-                  </View>
-                </View>
-              ) : null}
-
-              {permission ? (
-                <Card elevated style={styles.permissionCard}>
-                  <View style={styles.row}>
-                    <View style={styles.permissionIcon}>
-                      <MaterialCommunityIcons
-                        color={colors.warning}
-                        name="shield-key-outline"
-                        size={20}
-                      />
-                    </View>
-                    <View style={styles.grow}>
-                      <Text style={styles.cardTitle}>Approval requested</Text>
-                      <Text style={styles.cardMeta}>{permission.title}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.permissionActions}>
-                    {permission.options.map((option) => (
-                      <ActionButton
-                        key={option.optionId}
-                        label={option.name}
-                        onPress={() => {
-                          send("bezi.permission.resolve", {
-                            acpRequestId: permission.requestId,
-                            option: option.optionId,
-                          });
-                          setPermission(null);
-                        }}
-                        style={styles.grow}
-                        variant={
-                          option.kind?.includes("reject") ? "ghost" : "primary"
-                        }
-                      />
-                    ))}
-                  </View>
-                </Card>
-              ) : null}
-            </ScrollView>
-
-            <View style={styles.composerDock}>
               <View style={styles.composer}>
                 <TextInput
                   accessibilityLabel="Message Bezi"
                   editable={connected && Boolean(activeSessionId)}
                   multiline
                   onChangeText={setComposer}
+                  onFocus={() => {
+                    timelinePinned.current = true;
+                    requestAnimationFrame(() => {
+                      timelineRef.current?.scrollToEnd({ animated: true });
+                    });
+                  }}
                   placeholder={
                     activeSessionId ? "Message Bezi" : "Open a thread to start prompting"
                   }
@@ -1250,11 +1606,12 @@ export default function BeziMobileScreen() {
             <WorkspaceView
               canvases={selectedWorkspace?.canvases ?? []}
               destination={destination}
-              folderBusyId={folderBusyId}
               hasControl={hasControl}
               navigation={selectedWorkspace?.navigation ?? []}
               onOpen={openWorkspaceItem}
+              onRetryPageSync={startPageSync}
               onToggleFolder={toggleWorkspaceFolder}
+              pageSyncState={pageSyncState}
               pages={visiblePages}
               remoteStream={remoteStream}
               skills={workspace.skills}
@@ -1281,6 +1638,7 @@ export default function BeziMobileScreen() {
         onRelease={releaseControl}
         onSelectDestination={(next) => {
           if (next === "remote") setRemoteTitle("Full Remote");
+          if (next === "pages") startPageSync();
           setDestination(next);
           setDrawerOpen(false);
         }}
@@ -1312,6 +1670,10 @@ export default function BeziMobileScreen() {
                   setSelectedProjectId(
                     candidate.activeProjectId ?? candidate.projects[0]?.id ?? null,
                   );
+                  const desktopSelection = explicitWorkspaceSelection(candidate);
+                  send(desktopSelection.type, desktopSelection.body, {
+                    kind: "signaling",
+                  });
                   setWorkspacePickerOpen(false);
                 }}
                 style={[styles.pickerRow, selected && styles.pickerRowActive]}
@@ -1429,6 +1791,13 @@ export default function BeziMobileScreen() {
       </BottomSheet>
 
       <DiffViewer file={selectedDiff} onClose={() => setSelectedDiff(null)} />
+      <PageViewer
+        page={selectedPage}
+        onClose={() => {
+          pageRequest.current = null;
+          setSelectedPage(null);
+        }}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -1490,14 +1859,12 @@ function LaunchWizard({
   return (
     <SafeAreaView edges={["top", "bottom"]} style={styles.launchSafe}>
       <View style={styles.launchBrandRow}>
-        <View style={styles.launchBrandMark}>
-          <MaterialCommunityIcons
-            color={colors.primaryStrong}
-            name="robot-outline"
-            size={22}
-          />
-        </View>
-        <Text style={styles.launchBrand}>Bezi</Text>
+        <Image
+          accessibilityLabel="Bezi"
+          resizeMode="contain"
+          source={require("../../assets/bezi-wordmark-white.png")}
+          style={styles.launchWordmark}
+        />
       </View>
 
       <Animated.View style={[styles.launchAnimated, animatedStyle]}>
@@ -1619,7 +1986,11 @@ function LaunchWizard({
         ) : (
           <View accessibilityLiveRegion="polite" style={styles.launchStatus}>
             <View style={styles.launchStatusIcon}>
-              <ActivityIndicator color={colors.primaryStrong} size="large" />
+              <Image
+                resizeMode="contain"
+                source={require("../../assets/bezi-mascot-gray.png")}
+                style={styles.launchStatusMascot}
+              />
             </View>
             <Text style={styles.launchTitle}>{status.title}</Text>
             <Text style={styles.launchCopy}>{status.copy}</Text>
@@ -1903,10 +2274,17 @@ function WorkspaceDrawer({
         <Pressable onPress={() => undefined} style={styles.drawer}>
           <SafeAreaView edges={["top", "bottom"]} style={styles.drawerSafe}>
             <View style={styles.drawerHeader}>
-              <View style={styles.beziMark}>
-                <Text style={styles.beziMarkText}>B</Text>
-              </View>
-              <Text style={styles.drawerBrand}>Bezi</Text>
+              <Image
+                resizeMode="contain"
+                source={require("../../assets/bezi-mascot-gray.png")}
+                style={styles.drawerMascot}
+              />
+              <Image
+                accessibilityLabel="Bezi"
+                resizeMode="contain"
+                source={require("../../assets/bezi-wordmark-white.png")}
+                style={styles.drawerWordmark}
+              />
               <Pressable
                 accessibilityLabel="Close workspace menu"
                 accessibilityRole="button"
@@ -1979,11 +2357,11 @@ function WorkspaceDrawer({
 
             <Pressable
               accessibilityRole="button"
-              disabled={!connected || !hasControl || !project}
+              disabled={!connected || !project}
               onPress={onNewThread}
               style={[
                 styles.drawerNewThread,
-                (!connected || !hasControl || !project) && styles.disabled,
+                (!connected || !project) && styles.disabled,
               ]}
             >
               <MaterialCommunityIcons color={colors.text} name="plus" size={20} />
@@ -2083,22 +2461,24 @@ function WorkspaceDrawer({
 function WorkspaceView({
   canvases,
   destination,
-  folderBusyId,
   hasControl,
   navigation,
   onOpen,
+  onRetryPageSync,
   onToggleFolder,
+  pageSyncState,
   pages,
   remoteStream,
   skills,
 }: {
   canvases: WorkspaceItem[];
   destination: Exclude<BeziDestination, "threads">;
-  folderBusyId: string | null;
   hasControl: boolean;
   navigation: WorkspaceItem[];
   onOpen: (item: WorkspaceItem) => void;
+  onRetryPageSync: () => void;
   onToggleFolder: (item: WorkspaceItem) => void;
+  pageSyncState: BeziPageSyncState;
   pages: WorkspaceItem[];
   remoteStream: ReturnType<typeof useRemoteStream>;
   skills: string[];
@@ -2152,27 +2532,42 @@ function WorkspaceView({
       </View>
 
       {destination === "pages" ? (
-        <>
-          <WorkspaceList
-            empty="No pages are currently visible in this Bezi workspace."
-            folderBusyId={folderBusyId}
-            hasControl={hasControl}
-            icon="file-document-outline"
-            items={pages}
-            label="Private & shared pages"
-            meta="Document"
-            onOpen={onOpen}
-            onToggleFolder={onToggleFolder}
+        !shouldBlockForPageSync(
+          pageSyncState,
+          pages.length + canvases.length,
+        ) ? (
+          <>
+            {pageSyncState.phase === "syncing" ||
+            pageSyncState.phase === "failed" ? (
+              <PageCatalogRefresh
+                onRetry={onRetryPageSync}
+                state={pageSyncState}
+              />
+            ) : null}
+            <WorkspaceList
+              empty="No pages are currently visible in this Bezi workspace."
+              icon="file-document-outline"
+              items={pages}
+              label="Private & shared pages"
+              meta="Document"
+              onOpen={onOpen}
+              onToggleFolder={onToggleFolder}
+            />
+            <WorkspaceList
+              empty="No canvases are currently visible."
+              icon="view-grid-outline"
+              items={canvases}
+              label="Canvases"
+              meta="Canvas"
+              onOpen={onOpen}
+            />
+          </>
+        ) : (
+          <PageCatalogSync
+            onRetry={onRetryPageSync}
+            state={pageSyncState}
           />
-          <WorkspaceList
-            empty="No canvases are currently visible."
-            icon="view-grid-outline"
-            items={canvases}
-            label="Canvases"
-            meta="Canvas"
-            onOpen={onOpen}
-          />
-        </>
+        )
       ) : destination === "skills" ? (
         <View style={styles.libraryList}>
           <Text style={styles.sectionLabel}>Installed in this workspace</Text>
@@ -2275,10 +2670,98 @@ function WorkspaceView({
   );
 }
 
+function PageCatalogRefresh({
+  onRetry,
+  state,
+}: {
+  onRetry: () => void;
+  state: BeziPageSyncState;
+}) {
+  const failed = state.phase === "failed";
+  return (
+    <View
+      accessibilityLiveRegion="polite"
+      accessibilityRole={failed ? "alert" : "progressbar"}
+      style={[styles.pageRefresh, failed && styles.pageRefreshFailed]}
+    >
+      {failed ? (
+        <MaterialCommunityIcons
+          color={colors.danger}
+          name="cloud-alert-outline"
+          size={18}
+        />
+      ) : (
+        <ActivityIndicator color={colors.primaryStrong} size="small" />
+      )}
+      <Text numberOfLines={2} style={styles.pageRefreshText}>
+        {failed ? state.message : "Refreshing pages in the background..."}
+      </Text>
+      {failed ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={onRetry}
+          style={styles.pageRefreshRetry}
+        >
+          <Text style={styles.pageRefreshRetryText}>Retry</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function PageCatalogSync({
+  onRetry,
+  state,
+}: {
+  onRetry: () => void;
+  state: BeziPageSyncState;
+}) {
+  const failed = state.phase === "failed";
+  return (
+    <View
+      accessibilityLiveRegion="polite"
+      accessibilityRole={failed ? "alert" : "progressbar"}
+      style={styles.pageSync}
+    >
+      <View style={[styles.pageSyncIcon, failed && styles.pageSyncIconFailed]}>
+        {failed ? (
+          <MaterialCommunityIcons
+            color={colors.danger}
+            name="cloud-alert-outline"
+            size={28}
+          />
+        ) : (
+          <ActivityIndicator color={colors.primaryStrong} size="small" />
+        )}
+      </View>
+      <Text style={styles.pageSyncTitle}>
+        {failed ? "Pages couldn’t sync" : "Syncing pages"}
+      </Text>
+      <Text style={styles.pageSyncCopy}>
+        {failed
+          ? state.message
+          : "Checking Bezi for the latest pages, folders, and ordering before loading this view."}
+      </Text>
+      {failed ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={onRetry}
+          style={styles.pageSyncRetry}
+        >
+          <MaterialCommunityIcons
+            color={colors.primaryInk}
+            name="refresh"
+            size={18}
+          />
+          <Text style={styles.pageSyncRetryText}>Try again</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
 function WorkspaceList({
   empty,
-  folderBusyId = null,
-  hasControl = true,
   icon,
   items,
   label,
@@ -2287,8 +2770,6 @@ function WorkspaceList({
   onToggleFolder,
 }: {
   empty: string;
-  folderBusyId?: string | null;
-  hasControl?: boolean;
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   items: WorkspaceItem[];
   label: string;
@@ -2308,10 +2789,7 @@ function WorkspaceList({
       ) : (
         items.map((item) => {
           const folder = item.kind === "folder";
-          const busy = folderBusyId === item.id;
-          const disabled =
-            folder &&
-            (!onToggleFolder || busy || (item.remote && !hasControl));
+          const disabled = folder && !onToggleFolder;
           const title = decodeHtml(item.title);
           return (
             <Pressable
@@ -2322,7 +2800,6 @@ function WorkspaceList({
               }
               accessibilityRole="button"
               accessibilityState={{
-                busy,
                 disabled,
                 expanded: folder ? item.expanded : undefined,
               }}
@@ -2370,21 +2847,17 @@ function WorkspaceList({
                     : meta}
                 </Text>
               </View>
-              {busy ? (
-                <ActivityIndicator color={colors.primaryStrong} size="small" />
-              ) : (
-                <MaterialCommunityIcons
-                  color={colors.textMuted}
-                  name={
-                    folder
-                      ? item.expanded
-                        ? "chevron-down"
-                        : "chevron-right"
+              <MaterialCommunityIcons
+                color={colors.textMuted}
+                name={
+                  folder
+                    ? item.expanded
+                      ? "chevron-down"
                       : "chevron-right"
-                  }
-                  size={21}
-                />
-              )}
+                    : "chevron-right"
+                }
+                size={21}
+              />
             </Pressable>
           );
         })
@@ -2514,7 +2987,7 @@ function MessageCard({
   entry: ChatEntry;
   onOpenDiff: (file: BeziDiffFile) => void;
 }) {
-  const [expanded, setExpanded] = useState(entry.activityKind !== "thought");
+  const [expanded, setExpanded] = useState(false);
   if (entry.role === "activity") {
     const isThought = entry.activityKind === "thought";
     const isCode = entry.activityKind === "code" || Boolean(entry.files?.length);
@@ -2637,7 +3110,11 @@ function MessageCard({
   return (
     <View style={styles.assistantMessage}>
       <View style={styles.assistantMark}>
-        <Text style={styles.assistantMarkText}>B</Text>
+        <Image
+          resizeMode="contain"
+          source={require("../../assets/bezi-mascot-gray.png")}
+          style={styles.assistantMascot}
+        />
       </View>
       <View style={styles.assistantMessageBody}>
         <BeziMarkdown>{entry.text}</BeziMarkdown>
@@ -2722,6 +3199,7 @@ function DiffViewer({
   file: BeziDiffFile | null;
   onClose: () => void;
 }) {
+  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<"diff" | "updated">("diff");
   useEffect(() => {
     if (file) setMode("diff");
@@ -2737,12 +3215,27 @@ function DiffViewer({
     }));
   }, [file, mode]);
   return (
-    <Modal animationType="slide" onRequestClose={onClose} visible={file !== null}>
-      <SafeAreaView edges={["top", "bottom"]} style={styles.diffViewer}>
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle="fullScreen"
+      statusBarTranslucent={false}
+      visible={file !== null}
+    >
+      <View
+        style={[
+          styles.diffViewer,
+          {
+            paddingTop: insets.top + spacing.sm,
+            paddingBottom: insets.bottom + spacing.sm,
+          },
+        ]}
+      >
         <View style={styles.diffViewerHeader}>
           <Pressable
             accessibilityLabel="Close code diff"
             accessibilityRole="button"
+            hitSlop={12}
             onPress={onClose}
             style={styles.diffViewerClose}
           >
@@ -2821,7 +3314,117 @@ function DiffViewer({
             </View>
           ))}
         </ScrollView>
-      </SafeAreaView>
+      </View>
+    </Modal>
+  );
+}
+
+function PageViewer({
+  page,
+  onClose,
+}: {
+  page: PageDocument | null;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onClose}
+      presentationStyle="fullScreen"
+      statusBarTranslucent={false}
+      visible={page !== null}
+    >
+      <View
+        style={[
+          styles.diffViewer,
+          {
+            paddingTop: insets.top + spacing.sm,
+            paddingBottom: insets.bottom + spacing.sm,
+          },
+        ]}
+      >
+        <View style={styles.diffViewerHeader}>
+          <Pressable
+            accessibilityLabel="Close page"
+            accessibilityRole="button"
+            hitSlop={12}
+            onPress={onClose}
+            style={styles.diffViewerClose}
+          >
+            <MaterialCommunityIcons color={colors.text} name="close" size={23} />
+          </Pressable>
+          <View style={styles.diffViewerIdentity}>
+            <Text numberOfLines={1} style={styles.diffViewerTitle}>
+              {page?.title ?? "Page"}
+            </Text>
+            <Text numberOfLines={1} style={styles.diffViewerPath}>
+              Bezi page
+            </Text>
+          </View>
+          <View style={styles.pageViewerHeaderIcon}>
+            <MaterialCommunityIcons
+              color={colors.primaryStrong}
+              name="file-document-outline"
+              size={21}
+            />
+          </View>
+        </View>
+        {page?.markdown === null && !page.error ? (
+          <View
+            accessibilityLabel={`Loading ${page.title}`}
+            accessibilityLiveRegion="polite"
+            style={styles.pageViewerState}
+          >
+            <ActivityIndicator color={colors.primaryStrong} size="large" />
+            <Text style={styles.pageViewerStateTitle}>Opening page…</Text>
+            <Text style={styles.pageViewerStateCopy}>
+              Reading the latest formatted content from Bezi.
+            </Text>
+          </View>
+        ) : page?.error ? (
+          <View
+            accessibilityLiveRegion="assertive"
+            style={styles.pageViewerState}
+          >
+            <View style={styles.pageViewerErrorIcon}>
+              <MaterialCommunityIcons
+                color={colors.danger}
+                name="file-alert-outline"
+                size={26}
+              />
+            </View>
+            <Text style={styles.pageViewerStateTitle}>Couldn’t open this page</Text>
+            <Text style={styles.pageViewerStateCopy}>{page.error}</Text>
+          </View>
+        ) : (
+          <ScrollView
+            contentContainerStyle={styles.pageViewerBody}
+            showsVerticalScrollIndicator
+          >
+            {page?.markdown ? (
+              <BeziMarkdown>{page.markdown}</BeziMarkdown>
+            ) : (
+              <Text style={styles.pageViewerStateCopy}>
+                This page does not have any content yet.
+              </Text>
+            )}
+            {page?.truncated ? (
+              <View style={styles.pageViewerNotice}>
+                <MaterialCommunityIcons
+                  color={colors.warning}
+                  name="information-outline"
+                  size={18}
+                />
+                <Text style={styles.pageViewerNoticeText}>
+                  This page is unusually large, so the mobile preview shows the
+                  first portion.
+                </Text>
+              </View>
+            ) : null}
+          </ScrollView>
+        )}
+      </View>
     </Modal>
   );
 }
@@ -2838,7 +3441,14 @@ function EmptyState({
   return (
     <View style={styles.emptyState}>
       <View style={styles.emptyIcon}>
-        <MaterialCommunityIcons color={colors.primary} name={icon} size={25} />
+        <Image
+          resizeMode="contain"
+          source={require("../../assets/bezi-mascot-gray.png")}
+          style={styles.emptyMascot}
+        />
+        <View style={styles.emptyBadge}>
+          <MaterialCommunityIcons color={colors.text} name={icon} size={12} />
+        </View>
       </View>
       <Text style={styles.emptyTitle}>{title}</Text>
       <Text style={styles.emptyCopy}>{copy}</Text>
@@ -2973,12 +3583,20 @@ function parseWorkspace(
     navigation: parseWorkspaceItems(ui?.navigation),
   };
   const workspaces = groups.length > 0 ? groups : projects.length > 0 ? [fallbackWorkspace] : [];
+  const activeProjectId = stringValue(workspace?.activeProjectId);
+  const projectWorkspaceId = activeProjectId
+    ? workspaces.find((value) =>
+        value.projects.some((project) => project.id === activeProjectId),
+      )?.id
+    : undefined;
   return {
     workspaces,
     skills,
     activeWorkspaceId:
       activeWorkspaceId ??
       workspaces.find((value) => value.isActive)?.id ??
+      projectWorkspaceId ??
+      workspaces.find((value) => value.projects.length > 0)?.id ??
       workspaces[0]?.id ??
       null,
   };
@@ -3245,26 +3863,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   launchBrandRow: {
-    minHeight: 64,
+    minHeight: 58,
     flexDirection: "row",
     alignItems: "center",
-    gap: spacing.sm,
     paddingHorizontal: spacing.xl,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderSoft,
   },
-  launchBrandMark: {
-    width: 36,
-    height: 36,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#4A4554",
-    backgroundColor: "#29262E",
-  },
-  launchBrand: {
-    ...typography.heading,
-    color: colors.text,
-    letterSpacing: -0.2,
+  launchWordmark: {
+    width: 76,
+    height: 24,
   },
   launchAnimated: {
     flex: 1,
@@ -3308,7 +3916,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
@@ -3368,33 +3976,33 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xxxl,
   },
   launchChoice: {
-    minHeight: 82,
+    minHeight: 74,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.md,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
     backgroundColor: colors.surface,
   },
   launchChoiceSelected: {
-    borderColor: "#625B79",
-    backgroundColor: "#2B2832",
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
   },
   launchChoicePressed: {
     opacity: 0.72,
   },
   launchChoiceIcon: {
-    width: 48,
-    height: 48,
+    width: 42,
+    height: 42,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#4A4554",
-    backgroundColor: "#29262E",
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
   },
   launchChoiceTitle: {
     ...typography.heading,
@@ -3414,7 +4022,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     padding: spacing.xl,
     borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
     backgroundColor: colors.surface,
   },
@@ -3438,17 +4046,22 @@ const styles = StyleSheet.create({
     paddingBottom: 84,
   },
   launchStatusIcon: {
-    width: 72,
-    height: 72,
+    width: 64,
+    height: 84,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: spacing.sm,
-    borderRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#4A4554",
-    backgroundColor: "#29262E",
+  },
+  launchStatusMascot: {
+    width: 54,
+    height: 82,
+    opacity: 0.94,
   },
   launchErrorIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: radius.lg,
+    borderWidth: 1,
     borderColor: "#643D3D",
     backgroundColor: "#332526",
   },
@@ -3485,13 +4098,13 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   topBar: {
-    height: 64,
+    height: 58,
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 1,
     borderBottomColor: colors.borderSoft,
-    backgroundColor: "#232221",
+    backgroundColor: colors.surface,
   },
   topBarButton: {
     width: 48,
@@ -3528,13 +4141,13 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   controlStrip: {
-    minHeight: 34,
+    minHeight: 31,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
     paddingHorizontal: spacing.lg,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 1,
     borderBottomColor: colors.borderSoft,
     backgroundColor: colors.background,
   },
@@ -3548,7 +4161,7 @@ const styles = StyleSheet.create({
   timelineScroll: { flex: 1 },
   timeline: {
     flexGrow: 1,
-    gap: spacing.xl,
+    gap: spacing.lg,
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xl,
     paddingBottom: spacing.xl,
@@ -3561,9 +4174,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#4A4554",
-    backgroundColor: "#29262E",
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.primarySoft,
   },
   agentStatusIndicator: {
     width: 30,
@@ -3622,15 +4235,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
   },
   emptyIcon: {
-    width: 54,
-    height: 54,
+    width: 64,
+    height: 78,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 18,
-    backgroundColor: "#302D35",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#484252",
     marginBottom: spacing.xs,
+  },
+  emptyMascot: {
+    width: 48,
+    height: 72,
+    opacity: 0.94,
+  },
+  emptyBadge: {
+    position: "absolute",
+    right: 0,
+    bottom: 4,
+    width: 24,
+    height: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: colors.background,
+    backgroundColor: colors.surfaceStrong,
   },
   emptyTitle: {
     ...typography.heading,
@@ -3650,19 +4277,15 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   assistantMark: {
-    width: 26,
-    height: 26,
+    width: 24,
+    height: 32,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 8,
-    backgroundColor: colors.primary,
     marginTop: 1,
   },
-  assistantMarkText: {
-    color: colors.primaryInk,
-    fontSize: 13,
-    lineHeight: 16,
-    fontWeight: "800",
+  assistantMascot: {
+    width: 19,
+    height: 29,
   },
   assistantMessageBody: {
     minWidth: 0,
@@ -3673,14 +4296,13 @@ const styles = StyleSheet.create({
     alignSelf: "flex-end",
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
-    borderRadius: 18,
-    borderBottomRightRadius: 6,
+    borderRadius: radius.md,
     backgroundColor: colors.surfaceStrong,
   },
   activityCard: {
     minHeight: 56,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
     backgroundColor: colors.surface,
     overflow: "hidden",
@@ -3901,6 +4523,64 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     paddingBottom: spacing.xxxl,
   },
+  pageViewerHeaderIcon: {
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: spacing.xs,
+    borderRadius: radius.md,
+    backgroundColor: colors.primarySoft,
+  },
+  pageViewerBody: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xxxl,
+  },
+  pageViewerState: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: spacing.xxl,
+  },
+  pageViewerStateTitle: {
+    ...typography.heading,
+    color: colors.text,
+    marginTop: spacing.lg,
+    textAlign: "center",
+  },
+  pageViewerStateCopy: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginTop: spacing.sm,
+    textAlign: "center",
+  },
+  pageViewerErrorIcon: {
+    width: 54,
+    height: 54,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "#643D3D",
+    backgroundColor: "#332526",
+  },
+  pageViewerNotice: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm,
+    marginTop: spacing.xl,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  pageViewerNoticeText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    flex: 1,
+  },
   diffViewerLine: {
     minHeight: 22,
     flexDirection: "row",
@@ -3944,14 +4624,13 @@ const styles = StyleSheet.create({
   composerDock: {
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm,
-    paddingBottom: Platform.OS === "ios" ? 96 : 78,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: 1,
     borderTopColor: colors.borderSoft,
     backgroundColor: colors.background,
   },
   composer: {
-    borderRadius: 18,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.lg,
+    borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceRaised,
     overflow: "hidden",
@@ -4022,8 +4701,8 @@ const styles = StyleSheet.create({
     width: "88%",
     maxWidth: 390,
     height: "100%",
-    backgroundColor: "#242322",
-    borderRightWidth: StyleSheet.hairlineWidth,
+    backgroundColor: colors.surface,
+    borderRightWidth: 1,
     borderRightColor: colors.border,
     shadowColor: "#000",
     shadowOpacity: 0.42,
@@ -4032,30 +4711,23 @@ const styles = StyleSheet.create({
   },
   drawerSafe: { flex: 1 },
   drawerHeader: {
-    height: 62,
+    height: 58,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderSoft,
   },
-  beziMark: {
-    width: 28,
-    height: 28,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 8,
-    backgroundColor: colors.primary,
+  drawerMascot: {
+    width: 17,
+    height: 27,
   },
-  beziMarkText: {
-    color: colors.primaryInk,
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  drawerBrand: {
-    ...typography.heading,
-    color: colors.text,
+  drawerWordmark: {
+    width: 66,
+    height: 21,
     flex: 1,
-    fontSize: 17,
+    alignSelf: "center",
   },
   drawerClose: {
     width: 44,
@@ -4064,14 +4736,14 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   drawerProject: {
-    minHeight: 62,
+    minHeight: 56,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.md,
     marginHorizontal: spacing.md,
     paddingHorizontal: spacing.md,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceRaised,
   },
@@ -4089,7 +4761,7 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.md,
     marginTop: spacing.md,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceStrong,
   },
@@ -4102,18 +4774,18 @@ const styles = StyleSheet.create({
   drawerNavigation: {
     gap: 2,
     paddingBottom: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 1,
     borderBottomColor: colors.borderSoft,
   },
   drawerNavItem: {
-    minHeight: 46,
+    minHeight: 42,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.md,
     paddingHorizontal: spacing.md,
-    borderRadius: 10,
+    borderRadius: radius.sm,
   },
-  drawerNavItemActive: { backgroundColor: "#4A4846" },
+  drawerNavItemActive: { backgroundColor: colors.surfaceStrong },
   drawerNavText: { ...typography.body, color: colors.textSecondary },
   drawerNavTextActive: { color: colors.text, fontWeight: "600" },
   drawerSectionHeader: {
@@ -4143,7 +4815,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: spacing.md,
     paddingHorizontal: spacing.md,
-    borderRadius: 10,
+    borderRadius: radius.sm,
   },
   drawerThreadActive: { backgroundColor: colors.surfaceStrong },
   drawerThreadTitle: { ...typography.label, color: colors.text },
@@ -4156,7 +4828,7 @@ const styles = StyleSheet.create({
     margin: spacing.md,
     paddingHorizontal: spacing.lg,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceRaised,
   },
@@ -4167,7 +4839,7 @@ const styles = StyleSheet.create({
   controlButtonTitle: { ...typography.label, color: colors.text },
   controlButtonTitleActive: { color: colors.primaryInk },
   controlButtonMeta: { ...typography.caption, color: colors.textMuted },
-  controlButtonMetaActive: { color: "#575064" },
+  controlButtonMetaActive: { color: colors.primaryInk },
   workspaceScroll: {
     flexGrow: 1,
     paddingBottom: Platform.OS === "ios" ? 116 : 96,
@@ -4192,9 +4864,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: radius.lg,
-    backgroundColor: "#302D35",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#484252",
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   workspaceTitle: {
     ...typography.title,
@@ -4207,6 +4879,88 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     textAlign: "center",
     maxWidth: 340,
+  },
+  pageSync: {
+    alignItems: "center",
+    gap: spacing.sm,
+    marginHorizontal: spacing.lg,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xxl,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
+    backgroundColor: colors.surface,
+  },
+  pageSyncIcon: {
+    width: 52,
+    height: 52,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: spacing.xs,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.primarySoft,
+  },
+  pageSyncIconFailed: {
+    backgroundColor: colors.codeRemove,
+  },
+  pageSyncTitle: {
+    ...typography.heading,
+    color: colors.text,
+  },
+  pageSyncCopy: {
+    ...typography.body,
+    maxWidth: 330,
+    color: colors.textSecondary,
+    textAlign: "center",
+  },
+  pageSyncRetry: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.md,
+    backgroundColor: colors.primaryStrong,
+  },
+  pageSyncRetryText: {
+    ...typography.label,
+    color: colors.primaryInk,
+  },
+  pageRefresh: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginHorizontal: spacing.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.borderSoft,
+    backgroundColor: colors.surface,
+  },
+  pageRefreshFailed: {
+    borderColor: colors.danger,
+  },
+  pageRefreshText: {
+    ...typography.caption,
+    flex: 1,
+    color: colors.textSecondary,
+  },
+  pageRefreshRetry: {
+    minHeight: 32,
+    justifyContent: "center",
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primaryStrong,
+  },
+  pageRefreshRetryText: {
+    ...typography.label,
+    color: colors.primaryInk,
   },
   libraryList: {
     gap: spacing.xs,
@@ -4227,32 +4981,32 @@ const styles = StyleSheet.create({
   },
   sectionCount: { ...typography.caption, color: colors.textMuted },
   documentRow: {
-    minHeight: 72,
+    minHeight: 64,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.md,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
     backgroundColor: colors.surface,
   },
   folderRow: {
-    minHeight: 66,
-    borderColor: "#46414F",
-    backgroundColor: "#29272D",
+    minHeight: 60,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
   },
   documentIcon: {
-    width: 42,
-    height: 42,
+    width: 38,
+    height: 38,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 12,
-    backgroundColor: "#34313A",
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceStrong,
   },
   folderIcon: {
-    backgroundColor: "#3A3544",
+    backgroundColor: colors.primarySoft,
   },
   documentTitle: {
     ...typography.label,
@@ -4270,8 +5024,8 @@ const styles = StyleSheet.create({
     height: 38,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 11,
-    backgroundColor: "#34313A",
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceStrong,
   },
   workspaceItemTitle: { ...typography.label, color: colors.text },
   workspaceItemMeta: {
@@ -4286,7 +5040,7 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     paddingHorizontal: spacing.md,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
     backgroundColor: colors.surface,
   },
@@ -4297,7 +5051,7 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     padding: spacing.md,
     borderRadius: radius.md,
-    backgroundColor: "#302D35",
+    backgroundColor: colors.surfaceRaised,
     marginBottom: spacing.sm,
   },
   emptyCollection: {
@@ -4306,7 +5060,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: spacing.xl,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
     backgroundColor: colors.surface,
   },
@@ -4323,7 +5077,7 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.lg,
     padding: spacing.md,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.borderSoft,
   },
   fullRemoteTitle: { ...typography.label, color: colors.textSecondary },
@@ -4346,9 +5100,9 @@ const styles = StyleSheet.create({
     maxHeight: "84%",
     paddingTop: spacing.sm,
     paddingBottom: Platform.OS === "ios" ? spacing.xxxl : spacing.lg,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
+    borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.background,
   },

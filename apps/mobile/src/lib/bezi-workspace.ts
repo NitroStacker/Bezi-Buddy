@@ -67,6 +67,41 @@ export function applyWorkspaceFolderState(
   return visible;
 }
 
+export function toggleWorkspaceFolderOverride(
+  item: WorkspaceItem,
+  overrides: Readonly<Record<string, boolean>>,
+): Record<string, boolean> {
+  if (item.kind !== "folder") return { ...overrides };
+  return {
+    ...overrides,
+    [item.id]: !item.expanded,
+  };
+}
+
+export function workspaceAncestorIds(
+  items: WorkspaceItem[],
+  itemId: string,
+): string[] {
+  const ancestors: WorkspaceItem[] = [];
+  for (const item of items) {
+    while (
+      ancestors.length > 0 &&
+      ancestors[ancestors.length - 1].depth >= item.depth
+    ) {
+      ancestors.pop();
+    }
+    if (item.id === itemId) {
+      return ancestors
+        .filter((ancestor) => ancestor.kind === "folder")
+        .map((ancestor) => ancestor.id);
+    }
+    if (item.kind === "folder") {
+      ancestors.push(item);
+    }
+  }
+  return [];
+}
+
 function workspaceItemKind(value: unknown): WorkspaceItemKind {
   return value === "folder" || value === "canvas" ? value : "page";
 }

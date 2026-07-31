@@ -124,17 +124,17 @@ const viewerHtml = String.raw`<!doctype html>
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#141313;color:#f4f2ee;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#151413;color:#f2efe9;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
 #video{width:100%;height:100%;object-fit:contain;background:#111;display:none}
 #idle{position:absolute;inset:0;display:grid;place-items:center;background:
-radial-gradient(circle at 50% 45%,rgba(184,176,221,.12),transparent 34%),
+radial-gradient(circle at 50% 45%,rgba(214,207,242,.1),transparent 34%),
 linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),
 linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:auto,28px 28px,28px 28px}
-.mark{width:62px;height:62px;border:1px solid #44413f;border-radius:18px;display:grid;place-items:center;background:#242322;box-shadow:0 16px 40px rgba(0,0,0,.3)}
-.mark:before{content:"";width:22px;height:22px;border:5px solid #b8b0dd;border-top-color:transparent;border-radius:50%}
-.copy{position:absolute;top:calc(50% + 50px);left:0;right:0;text-align:center;color:#a7a39e;font-size:12px;letter-spacing:.2px}
+.mark{width:62px;height:62px;border:1px solid #48443f;border-radius:10px;display:grid;place-items:center;background:#242321;box-shadow:0 12px 32px rgba(0,0,0,.28)}
+.mark:before{content:"";width:22px;height:22px;border:5px solid #d6cff2;border-top-color:transparent;border-radius:50%}
+.copy{position:absolute;top:calc(50% + 50px);left:0;right:0;text-align:center;color:#89837a;font-size:12px;letter-spacing:.2px}
 #live{position:absolute;top:10px;left:10px;padding:6px 9px;border-radius:999px;background:rgba(20,19,19,.75);font-size:10px;display:none}
-#live:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#45d483;margin-right:6px}
+#live:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#4ccb84;margin-right:6px}
 </style>
 </head>
 <body>

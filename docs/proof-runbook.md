@@ -41,6 +41,23 @@ The launcher:
 - injects the temporary public URL into the development bundle; and
 - starts the companion with native GStreamer streaming enabled.
 
+You can also build and use the double-clickable Windows launcher:
+
+```powershell
+pnpm build:windows-launcher
+& ".\dist\bezi-buddy\Bezi Buddy.exe"
+```
+
+It uses the release companion binary, displays the same Expo Go URL, and copies
+that URL to the Windows clipboard. Keep its console window open while using the
+app; press Ctrl+C there to stop the companion and all relay processes.
+
+The first launch also offers one-time Gmail delivery setup. Create a Google App
+Password named `Bezi Buddy` in the browser window, then paste it into the hidden
+terminal prompt. The launcher sends a test message before saving the
+Windows-user-encrypted credential. Once configured, each new Expo Go URL is
+emailed automatically after Cloudflare and Metro are ready.
+
 No Wrangler login, Cloudflare account, deployed Worker, remote D1 database,
 TURN key, or Cloudflare secret is required for Stage A. Quick Tunnel hostnames
 change every time the launcher starts and are development-only.

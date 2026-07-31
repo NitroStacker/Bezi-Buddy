@@ -1,5 +1,6 @@
 export type BeziSession = {
   id: string;
+  threadId?: string;
   title: string;
   cwd?: string;
   projectId?: string;
@@ -55,6 +56,11 @@ export function parseBeziSessions(value: unknown): BeziSession[] {
       return [
         {
           id,
+          threadId:
+            stringValue(session.threadId) ??
+            stringValue(session.threadUUID) ??
+            stringValue(session.thread_id) ??
+            undefined,
           title:
             stringValue(session.title) ??
             stringValue(session.name) ??
@@ -153,10 +159,11 @@ export function reduceBeziSessionUpdate(
       stringValue(update.thoughtId) ??
       stringValue(update.messageId) ??
       stringValue(update.id);
-    const streamKey = thoughtId ? `thought:${thoughtId}` : undefined;
+    const streamKey = thoughtId
+      ? `thought:${thoughtId}`
+      : `stream:${normalizedKind}`;
     const last = current.at(-1);
     if (
-      streamKey &&
       last?.role === "activity" &&
       last.activityKind === "thought" &&
       last.streamKey === streamKey
@@ -299,6 +306,37 @@ export function statusFromBeziUpdate(
 ): BeziAgentStatus | null {
   const kind =
     stringValue(update.sessionUpdate) ?? stringValue(update.type) ?? "";
+  const terminalState = [
+    kind,
+    stringValue(update.status),
+    stringValue(update.stopReason),
+    stringValue(update.stop_reason),
+    stringValue(update.reason),
+  ]
+    .filter((value): value is string => value !== null)
+    .join(" ")
+    .toLowerCase();
+  if (
+    terminalState.includes("cancelled") ||
+    terminalState.includes("canceled") ||
+    terminalState.includes("cancel")
+  ) {
+    return {
+      label: "Cancelled",
+      detail: "Stopped in Bezi",
+      active: false,
+    };
+  }
+  if (
+    terminalState.includes("interrupted") ||
+    terminalState.includes("aborted")
+  ) {
+    return {
+      label: "Stopped",
+      detail: "The Bezi turn ended early",
+      active: false,
+    };
+  }
   if (kind === "user_message_chunk") {
     return { label: "Thinking", detail: "New prompt received", active: true };
   }

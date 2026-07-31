@@ -1,6 +1,10 @@
 param(
     [switch]$SkipCompanion,
-    [switch]$ExitAfterReady
+    [switch]$ExitAfterReady,
+    [switch]$UseBuiltCompanion,
+    [switch]$CopyExpoUrl,
+    [switch]$LauncherMode,
+    [switch]$SkipEmail
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +14,77 @@ $relayPort = 8787
 $metroPort = 8081
 $muxPort = 8090
 $processes = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+$trackedProcesses = [System.Collections.Generic.List[object]]::new()
+$activeSessionPath = Join-Path $runtime "active-session.json"
+$sessionId = [Guid]::NewGuid().ToString()
+$sessionStartedAt = [DateTime]::UtcNow.ToString("o")
+
+function Write-LauncherProgress {
+    param([string]$Stage, [string]$Message)
+    if ($LauncherMode) {
+        Write-Output "BEZI_PROGRESS|$Stage|$Message"
+    }
+}
+
+function Send-ExpoUrlEmail {
+    param([string]$ExpoUrl)
+
+    $configPath = Join-Path $env:LOCALAPPDATA "Bezi Remote\gmail-delivery.json"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        return [pscustomobject]@{
+            Status = "not-configured"
+            Message = "Email delivery is not configured."
+        }
+    }
+
+    try {
+        $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+        $securePassword = ConvertTo-SecureString $config.encryptedAppPassword
+        $credential = [Management.Automation.PSCredential]::new(
+            $config.emailAddress,
+            $securePassword
+        )
+        $encodedUrl = [Net.WebUtility]::HtmlEncode($ExpoUrl)
+        $body = @"
+<p>Bezi Buddy is ready.</p>
+<p><a href="$encodedUrl">Open this link in Expo Go</a></p>
+<p style="font-family: monospace;">$encodedUrl</p>
+<p>Keep the Bezi Buddy window running on your PC while using the app.</p>
+"@
+        $message = [Net.Mail.MailMessage]::new(
+            $config.emailAddress,
+            $config.emailAddress,
+            "Bezi Buddy is ready - open in Expo Go",
+            $body
+        )
+        $smtp = [Net.Mail.SmtpClient]::new("smtp.gmail.com", 587)
+        try {
+            $message.IsBodyHtml = $true
+            $message.SubjectEncoding = [Text.Encoding]::UTF8
+            $message.BodyEncoding = [Text.Encoding]::UTF8
+            $smtp.EnableSsl = $true
+            $smtp.UseDefaultCredentials = $false
+            $smtp.Credentials = $credential.GetNetworkCredential()
+            $smtp.Timeout = 20000
+            $smtp.Send($message)
+        }
+        finally {
+            $message.Dispose()
+            $smtp.Dispose()
+        }
+
+        return [pscustomobject]@{
+            Status = "sent"
+            Message = "Expo Go link emailed to $($config.emailAddress)."
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Status = "failed"
+            Message = "Email delivery failed: $($_.Exception.Message)"
+        }
+    }
+}
 
 function New-ProofToken {
     $bytes = New-Object byte[] 32
@@ -79,15 +154,21 @@ function Start-ProofProcess {
     )
     $stdout = Join-Path $runtime "$Name.stdout.log"
     $stderr = Join-Path $runtime "$Name.stderr.log"
-    $process = Start-Process `
-        -FilePath $FilePath `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $WorkingDirectory `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -PassThru
+    $startParameters = @{
+        FilePath = $FilePath
+        WorkingDirectory = $WorkingDirectory
+        WindowStyle = "Hidden"
+        RedirectStandardOutput = $stdout
+        RedirectStandardError = $stderr
+        PassThru = $true
+    }
+    if ($Arguments.Count -gt 0) {
+        $startParameters.ArgumentList = $Arguments
+    }
+    $process = Start-Process @startParameters
     $processes.Add($process)
+    $trackedProcesses.Add((Get-ProofProcessIdentity -Process $process -Name $Name))
+    Write-ActiveSessionManifest
     return $process
 }
 
@@ -153,8 +234,9 @@ function Wait-TunnelUrl {
 }
 
 function Wait-PublicEndpoint {
-    param([string]$Url, [System.Diagnostics.Process]$Process, [int]$Seconds = 60)
+    param([string]$Url, [System.Diagnostics.Process]$Process, [int]$Seconds = 90)
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    $lastError = "No response was received."
     while ([DateTime]::UtcNow -lt $deadline) {
         if ($Process.HasExited) {
             throw "The Quick Tunnel exited before $Url became reachable."
@@ -166,10 +248,11 @@ function Wait-PublicEndpoint {
             }
         }
         catch {
+            $lastError = $_.Exception.Message
             Start-Sleep -Milliseconds 750
         }
     }
-    throw "Timed out waiting for the public endpoint $Url."
+    throw "Timed out waiting for the public endpoint $Url. Last error: $lastError"
 }
 
 function Stop-ProofProcessTree {
@@ -181,7 +264,270 @@ function Stop-ProofProcessTree {
     Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
 }
 
+function Get-ProofProcessIdentity {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Name
+    )
+    $Process.Refresh()
+    $path = $null
+    try {
+        $path = $Process.MainModule.FileName
+    }
+    catch {}
+    return [pscustomobject]@{
+        name = $Name
+        processId = $Process.Id
+        startedAt = $Process.StartTime.ToUniversalTime().ToString("o")
+        executablePath = $path
+    }
+}
+
+function Test-TrackedProcessIdentity {
+    param([object]$Identity)
+    if ($null -eq $Identity -or $null -eq $Identity.processId -or $null -eq $Identity.startedAt) {
+        return $false
+    }
+    $process = Get-Process -Id ([int]$Identity.processId) -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $false
+    }
+    try {
+        $expectedStart = [DateTime]::Parse(
+            [string]$Identity.startedAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+        if ([Math]::Abs(($process.StartTime.ToUniversalTime() - $expectedStart).TotalSeconds) -gt 2) {
+            return $false
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$Identity.executablePath)) {
+            $actualPath = $process.MainModule.FileName
+            if (-not $actualPath.Equals(
+                [string]$Identity.executablePath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Write-ActiveSessionManifest {
+    $controller = Get-Process -Id $PID
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        sessionId = $sessionId
+        workspace = $workspace
+        startedAt = $sessionStartedAt
+        controller = Get-ProofProcessIdentity -Process $controller -Name "controller"
+        processes = @($trackedProcesses)
+    }
+    $temporaryPath = "$activeSessionPath.$sessionId.tmp"
+    [IO.File]::WriteAllText(
+        $temporaryPath,
+        ($manifest | ConvertTo-Json -Depth 6),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Move-Item -LiteralPath $temporaryPath -Destination $activeSessionPath -Force
+}
+
+function Remove-ActiveSessionManifest {
+    if (-not (Test-Path -LiteralPath $activeSessionPath)) {
+        return
+    }
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $activeSessionPath | ConvertFrom-Json
+        if ($manifest.sessionId -eq $sessionId) {
+            Remove-Item -LiteralPath $activeSessionPath -Force
+        }
+    }
+    catch {
+        # A later launch may be replacing a partially-written legacy manifest.
+    }
+}
+
+function Stop-TrackedProofSession {
+    if (-not (Test-Path -LiteralPath $activeSessionPath)) {
+        return
+    }
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $activeSessionPath | ConvertFrom-Json
+        if ($manifest.workspace -and -not ([string]$manifest.workspace).Equals(
+            $workspace,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            return
+        }
+
+        if (Test-TrackedProcessIdentity -Identity $manifest.controller) {
+            Stop-ProofProcessTree -ProcessId ([int]$manifest.controller.processId)
+            Start-Sleep -Milliseconds 500
+        }
+        foreach ($identity in @($manifest.processes)) {
+            if (Test-TrackedProcessIdentity -Identity $identity) {
+                Stop-ProofProcessTree -ProcessId ([int]$identity.processId)
+            }
+        }
+    }
+    catch {
+        Write-Warning "The previous Bezi Buddy session manifest could not be read: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item -LiteralPath $activeSessionPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Stop-LegacyProofProcesses {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $proofScriptPath = Join-Path $workspace "scripts\Start-ExpoGoProof.ps1"
+    $companionPath = Join-Path $workspace "apps\companion\src-tauri\target\release\bezi-remote-companion.exe"
+    $escapedWorkspace = [regex]::Escape($workspace)
+    $escapedScript = [regex]::Escape($proofScriptPath)
+    $selected = [Collections.Generic.HashSet[int]]::new()
+
+    foreach ($process in $all) {
+        if ($process.ProcessId -eq $PID) {
+            continue
+        }
+        $commandLine = [string]$process.CommandLine
+        $executablePath = [string]$process.ExecutablePath
+        $isProofController =
+            $process.Name -eq "powershell.exe" -and
+            $commandLine -match $escapedScript
+        $isCompanion =
+            $process.Name -eq "bezi-remote-companion.exe" -and
+            $executablePath.Equals($companionPath, [StringComparison]::OrdinalIgnoreCase)
+        $isRelay =
+            $process.Name -eq "node.exe" -and
+            $commandLine -match $escapedWorkspace -and
+            $commandLine -match "wrangler" -and
+            $commandLine -match "(?:--persist-to|dev\s+--local)"
+        $isMetro =
+            $process.Name -eq "node.exe" -and
+            $commandLine -match $escapedWorkspace -and
+            $commandLine -match "[\\/]expo[\\/]bin[\\/]cli" -and
+            $commandLine -match "[\s`"]start[\s`"]" -and
+            $commandLine -match "[\s`"]--go(?:[\s`"]|$)"
+        $isWorkspaceWorker =
+            $process.Name -in @("workerd.exe", "esbuild.exe") -and
+            $executablePath -match $escapedWorkspace
+
+        if ($isProofController -or $isCompanion -or $isRelay -or $isMetro -or $isWorkspaceWorker) {
+            [void]$selected.Add([int]$process.ProcessId)
+        }
+    }
+
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($process in $all) {
+            if ($selected.Contains([int]$process.ParentProcessId) -and
+                $selected.Add([int]$process.ProcessId)) {
+                $changed = $true
+            }
+        }
+    }
+
+    $listeners = @{}
+    foreach ($listener in @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue)) {
+        $listeners[[int]$listener.LocalPort] = [int]$listener.OwningProcess
+    }
+    $muxPorts = [Collections.Generic.HashSet[int]]::new()
+    foreach ($process in $all) {
+        $commandLine = [string]$process.CommandLine
+        $match = [regex]::Match(
+            $commandLine,
+            "scripts[\\/]proof-mux\.mjs\s+--listen\s+(\d+)\s+--metro\s+(\d+)\s+--relay\s+(\d+)"
+        )
+        if (-not $match.Success) {
+            continue
+        }
+        $listenPort = [int]$match.Groups[1].Value
+        $metroOwner = $listeners[[int]$match.Groups[2].Value]
+        $relayOwner = $listeners[[int]$match.Groups[3].Value]
+        $relayIsOursOrGone =
+            $null -eq $relayOwner -or
+            $selected.Contains([int]$relayOwner)
+        if ($selected.Contains([int]$metroOwner) -and $relayIsOursOrGone) {
+            [void]$selected.Add([int]$process.ProcessId)
+            [void]$muxPorts.Add($listenPort)
+        }
+    }
+    foreach ($process in $all) {
+        if ($process.Name -ne "cloudflared.exe") {
+            continue
+        }
+        $match = [regex]::Match(
+            [string]$process.CommandLine,
+            "--url\s+http://127\.0\.0\.1:(\d+)"
+        )
+        if ($match.Success -and $muxPorts.Contains([int]$match.Groups[1].Value)) {
+            [void]$selected.Add([int]$process.ProcessId)
+        }
+    }
+
+    foreach ($processId in @($selected)) {
+        Stop-ProofProcessTree -ProcessId $processId
+    }
+    if ($selected.Count -gt 0) {
+        Start-Sleep -Milliseconds 750
+    }
+}
+
+function Wait-CompanionRelayConnection {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$RelayPort,
+        [int]$Seconds = 30
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($Process.HasExited) {
+            throw "The Bezi companion exited before connecting to the relay."
+        }
+        $connection = Get-NetTCPConnection `
+            -OwningProcess $Process.Id `
+            -RemotePort $RelayPort `
+            -State Established `
+            -ErrorAction SilentlyContinue
+        if ($null -ne $connection) {
+            return
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "The Bezi companion did not connect to the new relay within $Seconds seconds."
+}
+
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+$mutexHash = Get-Sha256Base64Url -Value $workspace.ToLowerInvariant()
+$sessionMutex = [Threading.Mutex]::new($false, "Local\BeziBuddy-$($mutexHash.Substring(0, 20))")
+$ownsSessionMutex = $false
+try {
+    try {
+        $ownsSessionMutex = $sessionMutex.WaitOne([TimeSpan]::FromSeconds(30))
+    }
+    catch [Threading.AbandonedMutexException] {
+        $ownsSessionMutex = $true
+    }
+    if (-not $ownsSessionMutex) {
+        throw "Another Bezi Buddy launch is still preparing. Try again in a few seconds."
+    }
+    Write-LauncherProgress -Stage "cleanup" -Message "Closing the previous Bezi Buddy session"
+    Stop-TrackedProofSession
+    Stop-LegacyProofProcesses
+    Write-ActiveSessionManifest
+}
+finally {
+    if ($ownsSessionMutex) {
+        $sessionMutex.ReleaseMutex()
+    }
+    $sessionMutex.Dispose()
+}
 $relayPort = Get-AvailablePort -PreferredPort $relayPort
 $metroPort = Get-AvailablePort -PreferredPort $metroPort
 $muxPort = Get-AvailablePort -PreferredPort $muxPort
@@ -205,6 +551,7 @@ $relayVars = "DEV_OWNER_TOKEN=$proofToken`n"
 )
 
 try {
+    Write-LauncherProgress -Stage "local" -Message "Preparing the secure local relay"
     Push-Location $workspace
     try {
         pnpm --dir apps/relay exec wrangler d1 migrations apply DB --local --persist-to ../../.wrangler/state
@@ -224,6 +571,7 @@ try {
             "--persist-to", "../../.wrangler/state", "--port", "$relayPort"
         )
     Wait-LocalEndpoint -Url "http://127.0.0.1:$relayPort/health" -Process $relay
+    Write-LauncherProgress -Stage "local-ready" -Message "Local relay is ready"
 
     $proofExpiresAt = [DateTime]::UtcNow.AddMinutes(5).ToString("o")
     $proofHeaders = @{
@@ -268,12 +616,37 @@ try {
         )
     Wait-LocalEndpoint -Url "http://127.0.0.1:$muxPort/health" -Process $mux
 
-    $proofTunnel = Start-ProofProcess `
-        -Name "proof-tunnel" `
-        -FilePath $cloudflared `
-        -Arguments @("tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:$muxPort")
-    $proofUrl = Wait-TunnelUrl -Name "proof-tunnel" -Process $proofTunnel
-    Wait-PublicEndpoint -Url "$proofUrl/health" -Process $proofTunnel
+    $proofTunnel = $null
+    $proofUrl = $null
+    $tunnelAttempts = 3
+    for ($attempt = 1; $attempt -le $tunnelAttempts; $attempt++) {
+        Write-LauncherProgress `
+            -Stage "cloudflare" `
+            -Message "Connecting to Cloudflare (attempt $attempt of $tunnelAttempts)"
+        $proofTunnel = Start-ProofProcess `
+            -Name "proof-tunnel" `
+            -FilePath $cloudflared `
+            -Arguments @("tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:$muxPort")
+        try {
+            $proofUrl = Wait-TunnelUrl -Name "proof-tunnel" -Process $proofTunnel
+            Write-LauncherProgress `
+                -Stage "cloudflare-dns" `
+                -Message "Waiting for Cloudflare to publish the Expo URL"
+            Wait-PublicEndpoint -Url "$proofUrl/health" -Process $proofTunnel
+            Write-LauncherProgress -Stage "cloudflare-ready" -Message "Cloudflare relay is connected"
+            break
+        }
+        catch {
+            if (-not $proofTunnel.HasExited) {
+                Stop-ProofProcessTree -ProcessId $proofTunnel.Id
+                $proofTunnel.WaitForExit(5000) | Out-Null
+            }
+            if ($attempt -eq $tunnelAttempts) {
+                throw
+            }
+            Write-Warning "Cloudflare Quick Tunnel attempt $attempt did not become reachable. Requesting a fresh hostname."
+        }
+    }
 
     $mobileEnvironment = @"
 EXPO_PUBLIC_RELAY_URL=$proofUrl
@@ -293,6 +666,7 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
     # bundle/WebSocket URLs point back through the HTTPS Quick Tunnel.
     $env:EXPO_PACKAGER_PROXY_URL = $proofUrl
 
+    Write-LauncherProgress -Stage "expo" -Message "Starting Expo Go"
     $metro = Start-ProofProcess `
         -Name "metro" `
         -FilePath $pnpm `
@@ -304,6 +678,7 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
 
     Wait-PublicEndpoint -Url "$proofUrl/status" -Process $proofTunnel
     $expoUrl = $proofUrl.Replace("https://", "exp://")
+    Write-LauncherProgress -Stage "expo-ready" -Message "Expo Go is ready"
 
     $session = [ordered]@{
         startedAt = [DateTime]::UtcNow.ToString("o")
@@ -316,8 +691,14 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
         ($session | ConvertTo-Json),
         [Text.UTF8Encoding]::new($false)
     )
+    [IO.File]::WriteAllText(
+        (Join-Path $runtime "expo-go-url.txt"),
+        $expoUrl,
+        [Text.UTF8Encoding]::new($false)
+    )
 
     if (-not $SkipCompanion) {
+        Write-LauncherProgress -Stage "companion" -Message "Launching the Bezi companion"
         $gstreamer = Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\msvc_x86_64"
         $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
         if (-not (Test-Path -LiteralPath (Join-Path $gstreamer "bin\gstreamer-1.0-0.dll"))) {
@@ -334,20 +715,73 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
         $env:BEZI_REMOTE_PROOF_PAIRING_ID = $proofPairingId
         $env:BEZI_REMOTE_PROOF_PAIR_SECRET = $proofPairSecret
         $env:BEZI_REMOTE_PROOF_MOBILE_DEVICE_ID = $proofMobileDeviceId
-        Start-ProofProcess `
-            -Name "companion" `
-            -FilePath $pnpm `
-            -Arguments @("--dir", "apps/companion", "exec", "tauri", "dev", "--features", "native-streaming") |
-            Out-Null
+        $env:BEZI_REMOTE_START_HIDDEN = "1"
+        if ($UseBuiltCompanion) {
+            $builtCompanion = Join-Path $workspace "apps\companion\src-tauri\target\release\bezi-remote-companion.exe"
+            if (-not (Test-Path -LiteralPath $builtCompanion)) {
+                throw "The built companion was not found. Run 'pnpm build:companion:native' once, then launch again."
+            }
+            $companion = Start-ProofProcess `
+                -Name "companion" `
+                -FilePath $builtCompanion `
+                -Arguments @()
+        }
+        else {
+            $companion = Start-ProofProcess `
+                -Name "companion" `
+                -FilePath $pnpm `
+                -Arguments @("--dir", "apps/companion", "exec", "tauri", "dev", "--features", "native-streaming")
+        }
+        Write-LauncherProgress -Stage "companion-connect" -Message "Connecting the Bezi companion"
+        Wait-CompanionRelayConnection -Process $companion -RelayPort $relayPort
+    }
+
+    if ($SkipEmail) {
+        $emailDelivery = [pscustomobject]@{
+            Status = "not-configured"
+            Message = "Email delivery was skipped."
+        }
+    }
+    else {
+        Write-LauncherProgress -Stage "email" -Message "Emailing the Expo Go link"
+        $emailDelivery = Send-ExpoUrlEmail -ExpoUrl $expoUrl
+    }
+    if ($LauncherMode) {
+        Write-Output "BEZI_EMAIL|$($emailDelivery.Status)|$($emailDelivery.Message)"
+    }
+    elseif ($emailDelivery.Status -eq "sent") {
+        Write-Host $emailDelivery.Message -ForegroundColor Green
+    }
+    elseif ($emailDelivery.Status -eq "failed") {
+        Write-Warning $emailDelivery.Message
+    }
+
+    $copiedExpoUrl = $false
+    if ($CopyExpoUrl) {
+        try {
+            Set-Clipboard -Value $expoUrl
+            $copiedExpoUrl = $true
+        }
+        catch {
+            Write-Warning "The Expo Go URL could not be copied to the clipboard: $($_.Exception.Message)"
+        }
     }
 
     Write-Host ""
-    Write-Host "Bezi Remote proof is ready." -ForegroundColor Green
-    Write-Host "Open this in Expo Go:" -ForegroundColor Gray
-    Write-Host $expoUrl -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "The local relay URL and one-owner token were injected automatically." -ForegroundColor Gray
-    Write-Host "Press Ctrl+C to stop the proof session." -ForegroundColor DarkGray
+    if ($LauncherMode) {
+        Write-Output "BEZI_READY|$expoUrl|$copiedExpoUrl"
+    }
+    else {
+        Write-Host "Bezi Remote proof is ready." -ForegroundColor Green
+        Write-Host "Open this in Expo Go:" -ForegroundColor Gray
+        Write-Host $expoUrl -ForegroundColor Cyan
+        if ($copiedExpoUrl) {
+            Write-Host "Copied to the Windows clipboard." -ForegroundColor Green
+        }
+        Write-Host ""
+        Write-Host "The local relay URL and one-owner token were injected automatically." -ForegroundColor Gray
+        Write-Host "Press Ctrl+C to stop the proof session." -ForegroundColor DarkGray
+    }
 
     if ($ExitAfterReady) {
         $env:BEZI_REMOTE_RELAY_URL = $proofUrl
@@ -375,4 +809,5 @@ finally {
             Stop-ProofProcessTree -ProcessId $process.Id
         }
     }
+    Remove-ActiveSessionManifest
 }

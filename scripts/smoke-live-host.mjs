@@ -55,13 +55,20 @@ const keys = deriveSessionKeys({
 });
 const prefix = randomBytes(4);
 let sequence = 0;
+const beziOnly = process.argv.includes("--bezi-only");
+const completePages = process.argv.includes("--complete-pages");
+const catalogOnly = process.argv.includes("--catalog-only");
+let leaseHeld = false;
 
-socket.send(JSON.stringify({ type: "relay.lease.request", durationSeconds: 30 }));
-stage = "acquiring controller lease";
-await nextMessage(
-  queue,
-  (value) => value.type === "relay.lease" && value.holderDeviceId === mobileDeviceId,
-);
+if (!beziOnly) {
+  socket.send(JSON.stringify({ type: "relay.lease.request", durationSeconds: 30 }));
+  stage = "acquiring controller lease";
+  await nextMessage(
+    queue,
+    (value) => value.type === "relay.lease" && value.holderDeviceId === mobileDeviceId,
+  );
+  leaseHeld = true;
+}
 
 const send = (type, body, kind = "control") => {
   const requestId = randomUUID();
@@ -107,7 +114,11 @@ const capabilities = await nextPayload(
 );
 const instances = capabilities.body.unity?.instances ?? [];
 
-const catalogRequest = send("bezi.catalog.get", {}, "signaling");
+const catalogRequest = send(
+  "bezi.catalog.get",
+  completePages ? { completePages: true } : {},
+  "signaling",
+);
 stage = "loading live Bezi catalog";
 const catalog = await nextPayload(
   (payload) =>
@@ -129,6 +140,133 @@ const activeWorkspace =
   workspaces[0];
 if (!activeWorkspace) {
   throw new Error("The grouped Bezi workspace catalog was empty");
+}
+if (catalogOnly) {
+  const pageItems = activeWorkspace.ui?.pages ?? [];
+  const duplicateIds = pageItems
+    .map((page) => page.id)
+    .filter((id, index, ids) => ids.indexOf(id) !== index);
+  socket.close();
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        beziConnected: capabilities.body.bezi?.connected === true,
+        activeWorkspace: activeWorkspace.label,
+        pagesComplete: activeWorkspace.ui?.pagesComplete ?? null,
+        pageCount: pageItems.length,
+        duplicateIds,
+        phaseTitles: pageItems
+          .map((page) => page.title)
+          .filter((title) => /phase/i.test(title)),
+        pages: pageItems.map((page) => ({
+          title: page.title,
+          kind: page.kind,
+          depth: page.depth,
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  process.exit(0);
+}
+const requestedPageTitle = process.argv
+  .find((argument) => argument.startsWith("--page-title="))
+  ?.slice("--page-title=".length);
+const readableFolder = (activeWorkspace.ui?.pages ?? []).find(
+  (item) => item.kind === "folder",
+);
+let folderPreview = null;
+if (readableFolder?.id && !requestedPageTitle) {
+  const expanded = readableFolder.expanded !== true;
+  const folderRequest = send(
+    "bezi.ui.folder.set",
+    { itemId: readableFolder.id, expanded },
+    "signaling",
+  );
+  stage = "toggling a Bezi page folder without a controller lease";
+  const folder = await nextPayload(
+    (payload) =>
+      payload.requestId === folderRequest &&
+      (payload.type === "bezi.ui.folder.changed" || payload.type === "bezi.error"),
+    15_000,
+  );
+  if (folder.type === "bezi.error") {
+    throw new Error(folder.body.message ?? "The Bezi page folder toggle failed");
+  }
+  folderPreview = {
+    title: readableFolder.title,
+    expanded,
+    changedWithoutControl: !leaseHeld,
+  };
+  const restoreRequest = send(
+    "bezi.ui.folder.set",
+    { itemId: readableFolder.id, expanded: !expanded },
+    "signaling",
+  );
+  await nextPayload(
+    (payload) =>
+      payload.requestId === restoreRequest &&
+      (payload.type === "bezi.ui.folder.changed" || payload.type === "bezi.error"),
+    15_000,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+const pageItems = activeWorkspace.ui?.pages ?? [];
+const readablePage =
+  pageItems.find(
+    (item) =>
+      requestedPageTitle &&
+      item.title.toLowerCase() === requestedPageTitle.toLowerCase(),
+  ) ??
+  [...pageItems].reverse().find(
+    (item) => item.kind !== "folder" && item.kind !== "canvas",
+  );
+let pagePreview = null;
+if (readablePage?.id) {
+  const ancestors = [];
+  for (const item of pageItems) {
+    while (
+      ancestors.length > 0 &&
+      ancestors[ancestors.length - 1].depth >= item.depth
+    ) {
+      ancestors.pop();
+    }
+    if (item.id === readablePage.id) break;
+    if (item.kind === "folder") ancestors.push(item);
+  }
+  const pageRequest = send(
+    "bezi.page.get",
+    {
+      pageId: readablePage.id,
+      ancestorIds: ancestors.map((item) => item.id),
+    },
+    "signaling",
+  );
+  stage = "loading a formatted Bezi page";
+  const page = await nextPayload(
+    (payload) =>
+      payload.requestId === pageRequest &&
+      (payload.type === "bezi.page.content" || payload.type === "bezi.error"),
+    25_000,
+  );
+  if (page.type === "bezi.error") {
+    throw new Error(
+      `${readablePage.title} (${readablePage.id}) via ${ancestors
+        .map((item) => `${item.title} (${item.id})`)
+        .join(" / ")}: ${
+        page.body.message ?? "The Bezi page preview failed"
+      }`,
+    );
+  }
+  if (!page.body.title || typeof page.body.markdown !== "string") {
+    throw new Error("The Bezi page preview returned malformed content");
+  }
+  pagePreview = {
+    title: page.body.title,
+    characters: page.body.markdown.length,
+    truncated: page.body.truncated === true,
+  };
 }
 const activeProject =
   activeWorkspace.projects?.find(
@@ -200,12 +338,14 @@ const replayHasMessageContent = replayUpdates.some(
     update.sessionUpdate === "user_message_chunk" ||
     update.sessionUpdate === "agent_message_chunk",
 );
-if (!replayHasMessageContent && !process.argv.includes("--bezi-only")) {
+if (!replayHasMessageContent && !beziOnly) {
   throw new Error("The selected Bezi thread replayed no message content");
 }
 
-if (process.argv.includes("--bezi-only")) {
-  socket.send(JSON.stringify({ type: "relay.lease.release" }));
+if (beziOnly) {
+  if (leaseHeld) {
+    socket.send(JSON.stringify({ type: "relay.lease.release" }));
+  }
   socket.close();
   process.stdout.write(
     `${JSON.stringify(
@@ -215,9 +355,18 @@ if (process.argv.includes("--bezi-only")) {
         beziActiveProject: activeProject.label,
         beziWorkspaceCount: workspaces.length,
         beziWorkspaceProjectCount: activeWorkspace.projects?.length ?? 0,
+        beziFolderPreview: folderPreview,
+        beziPagePreview: pagePreview,
         beziWorkspaces: workspaces.map((workspace) => ({
           label: workspace.label,
           projectCount: workspace.projects?.length ?? 0,
+          pageCount: workspace.ui?.pages?.length ?? 0,
+          pagesComplete: workspace.ui?.pagesComplete ?? null,
+          pageTitles: completePages
+            ? workspace.ui?.pages?.map((page) => page.title) ?? []
+            : undefined,
+          uiAvailable: workspace.ui?.available ?? null,
+          uiError: workspace.ui?.error ?? null,
           activeProject:
             workspace.projects?.find(
               (project) => project.id === workspace.activeProjectId,

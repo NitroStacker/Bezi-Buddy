@@ -279,7 +279,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
     color: colors.primaryStrong,
-    backgroundColor: "#302D35",
+    backgroundColor: colors.surfaceRaised,
   },
   link: {
     color: "#8DAAFF",

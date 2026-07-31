@@ -10,6 +10,7 @@
     "dev:companion:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Companion-Native.ps1 dev",
     "proof:expo-go": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-ExpoGoProof.ps1",
     "build:companion:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Companion-Native.ps1 build",
+    "build:windows-launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Build-WindowsLauncher.ps1",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "pnpm -r --if-present lint",

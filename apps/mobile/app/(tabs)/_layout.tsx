@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
-import { Platform, StyleSheet } from "react-native";
+import { Image, Platform, StyleSheet } from "react-native";
 import { colors } from "@/theme/tokens";
 
 export default function TabsLayout() {
@@ -33,7 +33,11 @@ export default function TabsLayout() {
         options={{
           title: "Bezi",
           tabBarIcon: ({ color, size }) => (
-            <MaterialCommunityIcons color={color} size={size} name="message-text-outline" />
+            <Image
+              source={require("../../assets/bezi-mascot-gray.png")}
+              style={{ height: size - 2, width: size - 2 }}
+              tintColor={color}
+            />
           ),
         }}
       />
@@ -63,12 +67,12 @@ export default function TabsLayout() {
 const styles = StyleSheet.create({
   bar: {
     position: "absolute",
-    height: Platform.OS === "ios" ? 88 : 70,
-    paddingTop: 8,
-    backgroundColor: "rgba(35,34,33,0.97)",
+    height: Platform.OS === "ios" ? 84 : 66,
+    paddingTop: 7,
+    backgroundColor: "rgba(31,30,29,0.98)",
     borderTopColor: colors.borderSoft,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: 1,
   },
-  item: { paddingVertical: 3, maxWidth: 220 },
-  label: { fontSize: 11.5, fontWeight: "600" },
+  item: { paddingVertical: 2, maxWidth: 220 },
+  label: { fontSize: 11, fontWeight: "600" },
 });

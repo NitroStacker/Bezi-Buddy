@@ -80,7 +80,7 @@ export default function PairScreen() {
 
       <View style={styles.content}>
         <Text style={styles.copy}>
-          Open Bezi Remote on Windows and scan its one-time private code.
+          Open the Bezi companion on Windows and scan its one-time private code.
         </Text>
 
         <View style={styles.cameraFrame}>
@@ -166,7 +166,9 @@ const styles = StyleSheet.create({
     maxWidth: 420,
     aspectRatio: 1,
     overflow: "hidden",
-    borderRadius: 28,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
     backgroundColor: colors.backgroundDeep,
     alignItems: "center",
     justifyContent: "center",
@@ -175,11 +177,11 @@ const styles = StyleSheet.create({
   permissionTitle: { ...typography.heading, color: colors.text },
   permissionCopy: { ...typography.body, color: colors.textSecondary, textAlign: "center", marginBottom: spacing.md },
   scanGuide: { position: "absolute", inset: 30 },
-  corner: { position: "absolute", width: 46, height: 46, borderColor: colors.primary, borderWidth: 4 },
-  topLeft: { left: 0, top: 0, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 16 },
-  topRight: { right: 0, top: 0, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 16 },
-  bottomLeft: { left: 0, bottom: 0, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 16 },
-  bottomRight: { right: 0, bottom: 0, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 16 },
+  corner: { position: "absolute", width: 42, height: 42, borderColor: colors.primary, borderWidth: 3 },
+  topLeft: { left: 0, top: 0, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 6 },
+  topRight: { right: 0, top: 0, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 6 },
+  bottomLeft: { left: 0, bottom: 0, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 6 },
+  bottomRight: { right: 0, bottom: 0, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 6 },
   busyOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.overlay, alignItems: "center", justifyContent: "center", gap: spacing.md },
   busyText: { ...typography.label, color: colors.text },
   security: { flexDirection: "row", justifyContent: "center", alignItems: "center", gap: spacing.sm },
