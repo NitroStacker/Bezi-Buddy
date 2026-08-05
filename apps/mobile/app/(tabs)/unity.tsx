@@ -4,7 +4,9 @@ import * as Haptics from "expo-haptics";
 import { Link } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -20,9 +22,26 @@ import {
 import { RemoteSurface } from "@/components/remote-surface";
 import { useSession } from "@/context/session-context";
 import { useRemoteStream } from "@/hooks/use-remote-stream";
+import { visibleUnityHierarchy } from "@/lib/unity-hierarchy";
+import {
+  friendlyUnityPropertyName,
+  inspectorComponentScore,
+  inspectorPropertyMatches,
+  isCommonUnityProperty,
+} from "@/lib/unity-inspector";
 import { colors, radius, spacing, typography } from "@/theme/tokens";
 
 type UnityTab = "hierarchy" | "inspector" | "assets";
+type UnityViewKind = "game" | "scene";
+type UnityCaptureView = {
+  kind: UnityViewKind;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pixelsPerPoint: number;
+};
 type UnityInstance = {
   instanceId: string;
   processId: number;
@@ -33,6 +52,7 @@ type UnityInstance = {
   playing: boolean;
   paused: boolean;
   compiling: boolean;
+  captureViews: UnityCaptureView[];
 };
 type HierarchyNode = {
   id: string;
@@ -60,6 +80,7 @@ type RemoteProperty = {
   readOnly: boolean;
   value: RemoteValue;
   enumOptions: string[];
+  referenceType?: string;
 };
 type ComponentSnapshot = {
   targetId: string;
@@ -97,15 +118,26 @@ export default function UnityScreen() {
   const [inspector, setInspector] = useState<InspectorSnapshot | null>(null);
   const [staged, setStaged] = useState<StagedProperty | null>(null);
   const [query, setQuery] = useState("");
+  const [expandedHierarchyIds, setExpandedHierarchyIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [assetQuery, setAssetQuery] = useState("");
+  const [viewKind, setViewKind] = useState<UnityViewKind>("game");
   const [error, setError] = useState<string | null>(null);
   const hierarchyRequest = useRef<string | null>(null);
   const assetsRequest = useRef<string | null>(null);
   const inspectorRequest = useRef<string | null>(null);
   const applyRequest = useRef<string | null>(null);
   const instancesRequest = useRef<string | null>(null);
-  const remoteStream = useRemoteStream("unity", instanceId);
+  const remoteStream = useRemoteStream("unity", instanceId, viewKind);
   const selectedInstance = instances.find((instance) => instance.instanceId === instanceId) ?? null;
+
+  useEffect(() => {
+    const available = selectedInstance?.captureViews.map((view) => view.kind) ?? [];
+    if (available.length > 0 && !available.includes(viewKind)) {
+      setViewKind(available[0]);
+    }
+  }, [selectedInstance, viewKind]);
 
   useEffect(() => {
     const advertised = parseInstances(asRecord(capabilities?.body.unity)?.instances);
@@ -140,6 +172,7 @@ export default function UnityScreen() {
     setSelectedId(null);
     setInspector(null);
     setStaged(null);
+    setExpandedHierarchyIds(new Set());
     hierarchyRequest.current = null;
     assetsRequest.current = null;
     inspectorRequest.current = null;
@@ -253,15 +286,10 @@ export default function UnityScreen() {
     [instanceId, selectedId, send, subscribe],
   );
 
-  const filteredHierarchy = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return hierarchy;
-    return hierarchy.filter(
-      (node) =>
-        node.name.toLowerCase().includes(normalized) ||
-        node.scene.toLowerCase().includes(normalized),
-    );
-  }, [hierarchy, query]);
+  const filteredHierarchy = useMemo(
+    () => visibleUnityHierarchy(hierarchy, expandedHierarchyIds, query),
+    [expandedHierarchyIds, hierarchy, query],
+  );
   const filteredAssets = useMemo(() => {
     const normalized = assetQuery.trim().toLowerCase();
     if (!normalized) return assets;
@@ -367,10 +395,29 @@ export default function UnityScreen() {
         />
         <View style={styles.viewerTop}>
           <StatusPill
-            label={selectedInstance ? "Selected Unity window" : "Waiting for Unity"}
+            label={selectedInstance ? `${capitalize(viewKind)} view` : "Waiting for Unity"}
             tone={selectedInstance ? "live" : "neutral"}
           />
         </View>
+        {selectedInstance && selectedInstance.captureViews.length > 1 ? (
+          <View style={styles.viewerPicker}>
+            {(["game", "scene"] as const)
+              .filter((kind) => selectedInstance.captureViews.some((view) => view.kind === kind))
+              .map((kind) => (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: viewKind === kind }}
+                  key={kind}
+                  onPress={() => setViewKind(kind)}
+                  style={[styles.viewerPickerButton, viewKind === kind && styles.viewerPickerActive]}
+                >
+                  <Text style={[styles.viewerPickerText, viewKind === kind && styles.viewerPickerTextActive]}>
+                    {capitalize(kind)}
+                  </Text>
+                </Pressable>
+              ))}
+          </View>
+        ) : null}
       </View>
 
       <Card style={styles.transport}>
@@ -438,7 +485,7 @@ export default function UnityScreen() {
             style={[styles.segmentButton, tab === value && styles.segmentActive]}
           >
             <Text style={[styles.segmentText, tab === value && styles.segmentTextActive]}>
-              {value === "assets" ? "ScriptableObjects" : capitalize(value)}
+              {value === "assets" ? "Assets" : capitalize(value)}
             </Text>
           </Pressable>
         ))}
@@ -467,9 +514,7 @@ export default function UnityScreen() {
                       <Text numberOfLines={1} style={styles.sceneName}>{node.scene}</Text>
                     </View>
                   ) : null}
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => inspectTarget(node.id, true)}
+                  <View
                     style={[
                       styles.hierarchyRow,
                       { paddingLeft: spacing.md + Math.min(node.depth, 8) * 16 },
@@ -477,6 +522,34 @@ export default function UnityScreen() {
                       !node.active && styles.inactive,
                     ]}
                   >
+                    {node.childCount > 0 ? (
+                      <Pressable
+                        accessibilityLabel={`${expandedHierarchyIds.has(node.id) ? "Collapse" : "Expand"} ${node.name}`}
+                        accessibilityRole="button"
+                        onPress={() =>
+                          setExpandedHierarchyIds((current) => {
+                            const next = new Set(current);
+                            if (next.has(node.id)) next.delete(node.id);
+                            else next.add(node.id);
+                            return next;
+                          })
+                        }
+                        style={styles.hierarchyToggle}
+                      >
+                        <MaterialCommunityIcons
+                          color={colors.textSecondary}
+                          name={expandedHierarchyIds.has(node.id) || query.trim() ? "chevron-down" : "chevron-right"}
+                          size={18}
+                        />
+                      </Pressable>
+                    ) : (
+                      <View style={styles.hierarchyToggle} />
+                    )}
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => inspectTarget(node.id, true)}
+                      style={styles.hierarchyTarget}
+                    >
                     <MaterialCommunityIcons
                       color={node.childCount > 0 ? colors.textSecondary : colors.textMuted}
                       name={node.childCount > 0 ? "cube" : "cube-outline"}
@@ -494,7 +567,8 @@ export default function UnityScreen() {
                     {node.childCount > 0 ? (
                       <Text style={styles.childCount}>{node.childCount}</Text>
                     ) : null}
-                  </Pressable>
+                    </Pressable>
+                  </View>
                 </View>
               );
             })
@@ -502,13 +576,13 @@ export default function UnityScreen() {
         </Card>
       ) : tab === "assets" ? (
         <Card style={styles.panel}>
-          <SearchField placeholder="Search ScriptableObjects" value={assetQuery} onChange={setAssetQuery} />
+          <SearchField placeholder="Search project assets" value={assetQuery} onChange={setAssetQuery} />
           {!selectedInstance ? (
             <PanelEmpty title="No Unity Editor connected" copy="Assets appear when the Editor package is online." />
           ) : assetsRequest.current && assets.length === 0 ? (
-            <PanelEmpty title="Indexing ScriptableObjects…" copy="Only assets inside this Unity project are returned." />
+            <PanelEmpty title="Indexing project assets…" copy="Assets come directly from the connected Unity project." />
           ) : filteredAssets.length === 0 ? (
-            <PanelEmpty title="No matching ScriptableObjects" copy="No preview assets are substituted." />
+            <PanelEmpty title="No matching assets" copy="Try a script, prefab, material, model, or asset name." />
           ) : (
             filteredAssets.map((asset) => (
               <Pressable
@@ -532,6 +606,7 @@ export default function UnityScreen() {
         </Card>
       ) : (
         <InspectorPanel
+          assets={assets}
           hasControl={hasControl}
           inspector={inspector}
           staged={staged}
@@ -560,17 +635,58 @@ export default function UnityScreen() {
 
 function InspectorPanel({
   inspector,
+  assets,
   staged,
   hasControl,
   onStage,
   onApply,
 }: {
   inspector: InspectorSnapshot | null;
+  assets: AssetNode[];
   staged: StagedProperty | null;
   hasControl: boolean;
   onStage: (value: StagedProperty | null) => void;
   onApply: () => void;
 }) {
+  const [propertyQuery, setPropertyQuery] = useState("");
+  const [expandedComponents, setExpandedComponents] = useState<Set<string>>(() => new Set());
+  const [advancedComponents, setAdvancedComponents] = useState<Set<string>>(() => new Set());
+  const groups = useMemo<ComponentSnapshot[]>(() => {
+    if (!inspector) return [];
+    return [
+      {
+        targetId: inspector.targetId,
+        name: inspector.name,
+        typeName: inspector.typeName,
+        revision: inspector.revision,
+        properties: inspector.properties,
+      },
+      ...inspector.components,
+    ].filter((group) => group.properties.length > 0);
+  }, [inspector]);
+  const inspectorTargetId = inspector?.targetId;
+
+  useEffect(() => {
+    setPropertyQuery("");
+    setAdvancedComponents(new Set());
+    if (!inspectorTargetId) {
+      setExpandedComponents(new Set());
+      return;
+    }
+    const useful = [...groups]
+      .sort(
+        (left, right) =>
+          inspectorComponentScore(right.typeName, right.properties) -
+          inspectorComponentScore(left.typeName, left.properties),
+      )
+      .filter((group) => inspectorComponentScore(group.typeName, group.properties) > 0)
+      .slice(0, 2)
+      .map((group) => group.targetId);
+    setExpandedComponents(
+      new Set(useful.length > 0 ? useful : groups.slice(0, 1).map((group) => group.targetId)),
+    );
+  }, [groups, inspectorTargetId]);
+
   if (!inspector) {
     return (
       <Card style={styles.panel}>
@@ -581,16 +697,28 @@ function InspectorPanel({
       </Card>
     );
   }
-  const groups: ComponentSnapshot[] = [
-    {
-      targetId: inspector.targetId,
-      name: inspector.name,
-      typeName: inspector.typeName,
-      revision: inspector.revision,
-      properties: inspector.properties,
-    },
-    ...inspector.components,
-  ].filter((group) => group.properties.length > 0);
+  const normalizedQuery = propertyQuery.trim();
+  const visibleGroups = groups
+    .map((group) => {
+      const common = group.properties.filter((property) =>
+        isCommonUnityProperty(group.typeName, property),
+      );
+      const matching = group.properties.filter((property) =>
+        inspectorPropertyMatches(group.typeName, property, normalizedQuery),
+      );
+      return {
+        group,
+        common,
+        properties: normalizedQuery
+          ? matching
+          : advancedComponents.has(group.targetId)
+            ? group.properties
+            : common,
+        editableCount: group.properties.filter((property) => !property.readOnly).length,
+      };
+    })
+    .filter((entry) => !normalizedQuery || entry.properties.length > 0);
+
   return (
     <Card style={styles.inspectorPanel}>
       <View style={styles.inspectorTitle}>
@@ -599,48 +727,181 @@ function InspectorPanel({
         </View>
         <View style={styles.grow}>
           <Text style={styles.objectName}>{inspector.name}</Text>
-          <Text numberOfLines={1} style={styles.objectMeta}>{inspector.typeName}</Text>
+          <Text numberOfLines={1} style={styles.objectMeta}>
+            {groups.length} {groups.length === 1 ? "component" : "components"} · {shortType(inspector.typeName)}
+          </Text>
         </View>
-        {staged ? <StatusPill label="Staged" tone="warning" /> : null}
+        <Pressable
+          accessibilityLabel="Collapse all inspector components"
+          accessibilityRole="button"
+          onPress={() => setExpandedComponents(new Set())}
+          style={styles.inspectorIconButton}
+        >
+          <MaterialCommunityIcons color={colors.textMuted} name="collapse-all-outline" size={20} />
+        </Pressable>
       </View>
-      {groups.map((group) => (
-        <View key={group.targetId} style={styles.component}>
-          <View style={styles.componentHeader}>
-            <MaterialCommunityIcons color={colors.textMuted} name="puzzle-outline" size={17} />
+
+      {staged ? (
+        <View style={styles.stagedCard}>
+          <View style={styles.stagedCopy}>
+            <MaterialCommunityIcons color={colors.warning} name="pencil-circle" size={22} />
             <View style={styles.grow}>
-              <Text style={styles.componentName}>{shortType(group.typeName)}</Text>
-              <Text numberOfLines={1} style={styles.componentType}>{group.typeName}</Text>
+              <Text style={styles.stagedTitle}>Change ready</Text>
+              <Text numberOfLines={1} style={styles.stagedDetail}>
+                {friendlyUnityPropertyName(staged.property)} · {remoteValueText(staged.value, staged.property)}
+              </Text>
             </View>
+            <Pressable
+              accessibilityLabel="Discard staged inspector change"
+              accessibilityRole="button"
+              onPress={() => onStage(null)}
+              style={styles.inspectorIconButton}
+            >
+              <MaterialCommunityIcons color={colors.textMuted} name="close" size={20} />
+            </Pressable>
           </View>
-          {group.properties.slice(0, 80).map((property) => {
-            const isStaged =
-              staged?.targetId === group.targetId &&
-              staged.property.path === property.path;
-            return (
-              <PropertyEditor
-                key={`${group.targetId}:${property.path}`}
-                property={property}
-                stagedValue={isStaged ? staged.value : undefined}
-                onStage={(value) =>
-                  onStage({
-                    targetId: group.targetId,
-                    revision: group.revision,
-                    property,
-                    value,
-                  })
-                }
-              />
-            );
-          })}
+          <ActionButton
+            disabled={!hasControl}
+            label={hasControl ? "Apply change in Unity" : "Take control to apply"}
+            onPress={onApply}
+          />
         </View>
-      ))}
-      <ActionButton
-        disabled={!staged || !hasControl}
-        label={staged ? (hasControl ? "Apply staged change" : "Take control to apply") : "No staged changes"}
-        onPress={onApply}
+      ) : null}
+
+      <SearchField
+        placeholder="Find a component or property"
+        value={propertyQuery}
+        onChange={setPropertyQuery}
       />
+      <View style={styles.inspectorHintRow}>
+        <MaterialCommunityIcons color={colors.primaryStrong} name="star-four-points-outline" size={16} />
+        <Text style={styles.inspectorHint}>
+          Showing useful fields first. Open All fields inside a component when you need Unity internals.
+        </Text>
+      </View>
+
+      {visibleGroups.length === 0 ? (
+        <PanelEmpty title="No matching fields" copy="Try a component name such as Text, Transform, or Renderer." />
+      ) : (
+        visibleGroups.map(({ group, common, properties, editableCount }) => {
+          const expanded = normalizedQuery ? true : expandedComponents.has(group.targetId);
+          const advanced = advancedComponents.has(group.targetId);
+          return (
+            <View key={group.targetId} style={styles.component}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded }}
+                onPress={() =>
+                  setExpandedComponents((current) => toggleSetValue(current, group.targetId))
+                }
+                style={styles.componentHeader}
+              >
+                <View style={styles.componentIcon}>
+                  <MaterialCommunityIcons
+                    color={colors.primaryStrong}
+                    name={componentIcon(group.typeName)}
+                    size={18}
+                  />
+                </View>
+                <View style={styles.grow}>
+                  <Text style={styles.componentName}>{friendlyComponentName(group.typeName)}</Text>
+                  <Text numberOfLines={1} style={styles.componentType}>
+                    {common.length} useful · {editableCount} editable
+                  </Text>
+                </View>
+                {staged?.targetId === group.targetId ? <View style={styles.stagedDot} /> : null}
+                <MaterialCommunityIcons
+                  color={colors.textMuted}
+                  name={expanded ? "chevron-up" : "chevron-down"}
+                  size={21}
+                />
+              </Pressable>
+
+              {expanded ? (
+                <View>
+                  {!normalizedQuery ? (
+                    <View style={styles.componentFilters}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: !advanced }}
+                        onPress={() =>
+                          setAdvancedComponents((current) => {
+                            const next = new Set(current);
+                            next.delete(group.targetId);
+                            return next;
+                          })
+                        }
+                        style={[styles.filterChip, !advanced && styles.filterChipActive]}
+                      >
+                        <Text style={[styles.filterChipText, !advanced && styles.filterChipTextActive]}>Useful</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: advanced }}
+                        onPress={() =>
+                          setAdvancedComponents((current) => {
+                            const next = new Set(current);
+                            next.add(group.targetId);
+                            return next;
+                          })
+                        }
+                        style={[styles.filterChip, advanced && styles.filterChipActive]}
+                      >
+                        <Text style={[styles.filterChipText, advanced && styles.filterChipTextActive]}>
+                          All fields ({group.properties.length})
+                        </Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+
+                  {properties.length === 0 ? (
+                    <View style={styles.noUsefulFields}>
+                      <Text style={styles.noUsefulFieldsText}>No commonly edited fields in this component.</Text>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() =>
+                          setAdvancedComponents((current) => {
+                            const next = new Set(current);
+                            next.add(group.targetId);
+                            return next;
+                          })
+                        }
+                      >
+                        <Text style={styles.showAllText}>Show all fields</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    properties.map((property) => {
+                      const isStaged =
+                        staged?.targetId === group.targetId && staged.property.path === property.path;
+                      return (
+                        <PropertyEditor
+                          assets={assets}
+                          isStaged={isStaged}
+                          key={`${group.targetId}:${property.path}`}
+                          property={property}
+                          showMetadata={advanced || Boolean(normalizedQuery)}
+                          stagedValue={isStaged ? staged.value : undefined}
+                          onStage={(value) =>
+                            onStage({
+                              targetId: group.targetId,
+                              revision: group.revision,
+                              property,
+                              value,
+                            })
+                          }
+                        />
+                      );
+                    })
+                  )}
+                </View>
+              ) : null}
+            </View>
+          );
+        })
+      )}
       <Text style={styles.undoNote}>
-        Apply creates one Unity Undo group. ScriptableObject assets save explicitly; scene changes stay unsaved.
+        Every apply creates one Unity Undo step. Scene changes remain unsaved until you save in Unity.
       </Text>
     </Card>
   );
@@ -648,13 +909,22 @@ function InspectorPanel({
 
 function PropertyEditor({
   property,
+  assets,
+  isStaged,
+  showMetadata,
   stagedValue,
   onStage,
 }: {
   property: RemoteProperty;
+  assets: AssetNode[];
+  isStaged: boolean;
+  showMetadata: boolean;
   stagedValue?: RemoteValue;
   onStage: (value: RemoteValue) => void;
 }) {
+  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
+  const [referenceQuery, setReferenceQuery] = useState("");
+  const [enumPickerOpen, setEnumPickerOpen] = useState(false);
   const value = stagedValue ?? property.value;
   const editable =
     !property.readOnly &&
@@ -675,60 +945,284 @@ function PropertyEditor({
       "bounds",
       "boundsInt",
       "quaternion",
+      "objectReference",
     ].includes(property.kind);
 
+  const referenceAssets = useMemo(() => {
+    if (property.kind !== "objectReference") return [];
+    const expectedType = referenceTypeName(property.referenceType);
+    const normalized = referenceQuery.trim().toLowerCase();
+    return assets
+      .filter((asset) => !expectedType || assetTypeMatches(asset.typeName, expectedType))
+      .filter(
+        (asset) =>
+          !normalized ||
+          asset.name.toLowerCase().includes(normalized) ||
+          asset.path.toLowerCase().includes(normalized) ||
+          asset.typeName.toLowerCase().includes(normalized),
+      )
+      .slice(0, 30);
+  }, [assets, property.kind, property.referenceType, referenceQuery]);
+  const assignedAsset = assets.find((asset) => asset.id === value.objectId);
+  const vectorComponents = Array.isArray(value.components) ? value.components : null;
+  const labels = vectorComponents ? componentLabels(property.kind, vectorComponents.length) : [];
+
   return (
-    <View style={styles.property}>
-      <View style={styles.propertyCopy}>
-        <Text style={styles.propertyName}>{property.displayName}</Text>
-        <Text numberOfLines={1} style={styles.propertyPath}>
+    <View style={[styles.property, isStaged && styles.propertyStaged]}>
+      <View style={styles.propertyHeader}>
+        <View style={styles.propertyKindIcon}>
+          <MaterialCommunityIcons
+            color={isStaged ? colors.warning : colors.textMuted}
+            name={propertyIcon(property.kind)}
+            size={16}
+          />
+        </View>
+        <View style={styles.grow}>
+          <Text style={styles.propertyName}>{friendlyUnityPropertyName(property)}</Text>
+          {showMetadata ? (
+            <Text numberOfLines={1} style={styles.propertyPath}>
           {property.path} · {property.kind}
           {property.readOnly ? " · Read only" : ""}
-        </Text>
+            </Text>
+          ) : null}
+        </View>
+        {isStaged ? <Text style={styles.stagedLabel}>CHANGED</Text> : null}
       </View>
       {property.kind === "boolean" ? (
-        <Pressable
-          accessibilityRole="switch"
-          accessibilityState={{ checked: value.boolValue === true, disabled: !editable }}
-          disabled={!editable}
-          onPress={() => onStage({ kind: "boolean", boolValue: value.boolValue !== true })}
-          style={[
-            styles.boolean,
-            value.boolValue !== true && styles.booleanOff,
-            !editable && styles.disabled,
-          ]}
-        >
-          {value.boolValue === true ? (
-            <MaterialCommunityIcons color={colors.primaryInk} name="check" size={18} />
-          ) : null}
-        </Pressable>
+        <View style={styles.booleanRow}>
+          <Text style={styles.controlValueText}>{value.boolValue === true ? "On" : "Off"}</Text>
+          <Pressable
+            accessibilityRole="switch"
+            accessibilityState={{ checked: value.boolValue === true, disabled: !editable }}
+            disabled={!editable}
+            onPress={() => onStage({ kind: "boolean", boolValue: value.boolValue !== true })}
+            style={[
+              styles.boolean,
+              value.boolValue !== true && styles.booleanOff,
+              !editable && styles.disabled,
+            ]}
+          >
+            <View style={[styles.booleanThumb, value.boolValue === true && styles.booleanThumbOn]} />
+          </Pressable>
+        </View>
+      ) : property.kind === "objectReference" ? (
+        <>
+          <Pressable
+            accessibilityLabel={`${property.displayName}: ${assignedAsset?.name ?? "None"}`}
+            accessibilityRole="button"
+            disabled={!editable}
+            onPress={() => setReferencePickerOpen(true)}
+            style={[styles.fullWidthControl, !editable && styles.disabled]}
+          >
+            <MaterialCommunityIcons color={colors.primaryStrong} name="database-search-outline" size={18} />
+            <View style={styles.grow}>
+              <Text numberOfLines={1} style={styles.controlValueText}>
+                {assignedAsset?.name ?? (value.objectId ? "Assigned asset" : "None")}
+              </Text>
+              <Text numberOfLines={1} style={styles.controlHintText}>
+                {referenceTypeName(property.referenceType) ?? "Unity asset"}
+              </Text>
+            </View>
+            <MaterialCommunityIcons color={colors.textMuted} name="chevron-right" size={19} />
+          </Pressable>
+          <Modal
+            animationType="slide"
+            onRequestClose={() => setReferencePickerOpen(false)}
+            presentationStyle="pageSheet"
+            visible={referencePickerOpen}
+          >
+            <View style={styles.pickerSheet}>
+              <View style={styles.pickerSheetHeader}>
+                <View style={styles.grow}>
+                  <Text style={styles.pickerSheetTitle}>Choose {friendlyUnityPropertyName(property)}</Text>
+                  <Text style={styles.pickerSheetSubtitle}>
+                    {referenceTypeName(property.referenceType) ?? "Compatible Unity assets"}
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityLabel="Close asset picker"
+                  accessibilityRole="button"
+                  onPress={() => setReferencePickerOpen(false)}
+                  style={styles.inspectorIconButton}
+                >
+                  <MaterialCommunityIcons color={colors.text} name="close" size={22} />
+                </Pressable>
+              </View>
+              <SearchField
+                placeholder={`Search ${referenceTypeName(property.referenceType) ?? "assets"}`}
+                value={referenceQuery}
+                onChange={setReferenceQuery}
+              />
+              <ScrollView contentContainerStyle={styles.pickerSheetList}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    onStage({ kind: "objectReference", objectId: "" });
+                    setReferencePickerOpen(false);
+                  }}
+                  style={styles.referenceOption}
+                >
+                  <MaterialCommunityIcons color={colors.textMuted} name="cancel" size={20} />
+                  <Text style={styles.referenceOptionName}>None</Text>
+                </Pressable>
+                {referenceAssets.map((asset) => (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={asset.id}
+                    onPress={() => {
+                      onStage({ kind: "objectReference", objectId: asset.id });
+                      setReferencePickerOpen(false);
+                    }}
+                    style={[
+                      styles.referenceOption,
+                      asset.id === value.objectId && styles.referenceOptionSelected,
+                    ]}
+                  >
+                    <View style={styles.referenceOptionIcon}>
+                      <MaterialCommunityIcons color={colors.primaryStrong} name="file-outline" size={19} />
+                    </View>
+                    <View style={styles.grow}>
+                      <Text style={styles.referenceOptionName}>{asset.name}</Text>
+                      <Text numberOfLines={1} style={styles.referenceOptionPath}>{asset.path}</Text>
+                    </View>
+                    {asset.id === value.objectId ? (
+                      <MaterialCommunityIcons color={colors.primary} name="check-circle" size={20} />
+                    ) : null}
+                  </Pressable>
+                ))}
+                {referenceAssets.length === 0 ? (
+                  <Text style={styles.referenceEmpty}>No compatible project assets found.</Text>
+                ) : null}
+              </ScrollView>
+            </View>
+          </Modal>
+        </>
       ) : property.kind === "enum" && property.enumOptions.length > 0 ? (
-        <Pressable
-          accessibilityLabel={`${property.displayName}: ${remoteValueText(value, property)}`}
-          accessibilityRole="button"
-          disabled={!editable}
-          onPress={() => {
-            const current = value.intValue ?? 0;
-            const next = (current + 1) % property.enumOptions.length;
-            onStage({ kind: "enum", intValue: next, stringValue: property.enumOptions[next] });
-          }}
-          style={[styles.enumButton, !editable && styles.disabled]}
-        >
-          <Text numberOfLines={1} style={styles.enumText}>{remoteValueText(value, property)}</Text>
-          <MaterialCommunityIcons color={colors.textMuted} name="chevron-down" size={18} />
-        </Pressable>
+        <>
+          <Pressable
+            accessibilityLabel={`${property.displayName}: ${remoteValueText(value, property)}`}
+            accessibilityRole="button"
+            disabled={!editable}
+            onPress={() => setEnumPickerOpen(true)}
+            style={[styles.fullWidthControl, !editable && styles.disabled]}
+          >
+            <Text numberOfLines={1} style={[styles.controlValueText, styles.grow]}>
+              {remoteValueText(value, property)}
+            </Text>
+            <MaterialCommunityIcons color={colors.textMuted} name="chevron-right" size={19} />
+          </Pressable>
+          <ChoiceSheet
+            onClose={() => setEnumPickerOpen(false)}
+            onSelect={(index, option) => {
+              onStage({ kind: "enum", intValue: index, stringValue: option });
+              setEnumPickerOpen(false);
+            }}
+            options={property.enumOptions}
+            selectedIndex={value.intValue ?? 0}
+            title={friendlyUnityPropertyName(property)}
+            visible={enumPickerOpen}
+          />
+        </>
+      ) : editable && vectorComponents ? (
+        <View style={styles.componentValueGrid}>
+          {vectorComponents.map((component, index) => (
+            <View key={`${property.path}:${labels[index]}`} style={styles.componentValueField}>
+              <Text style={styles.componentValueLabel}>{labels[index]}</Text>
+              <TextInput
+                accessibilityLabel={`${property.displayName} ${labels[index]}`}
+                keyboardType="numbers-and-punctuation"
+                onChangeText={(text) => {
+                  const next = [...vectorComponents];
+                  next[index] = Number.parseFloat(text) || 0;
+                  onStage({ kind: property.kind, components: next });
+                }}
+                selectTextOnFocus
+                style={styles.componentValueInput}
+                value={String(component)}
+              />
+            </View>
+          ))}
+        </View>
       ) : editable ? (
         <TextInput
           accessibilityLabel={property.displayName}
           keyboardType={property.kind === "string" ? "default" : "numbers-and-punctuation"}
+          multiline={property.kind === "string"}
           onChangeText={(text) => onStage(remoteValueFromText(property.kind, text, value))}
-          style={styles.valueInput}
+          placeholder={property.kind === "string" ? "Enter text" : undefined}
+          placeholderTextColor={colors.textMuted}
+          selectTextOnFocus={property.kind !== "string"}
+          style={[styles.valueInput, property.kind === "string" && styles.stringInput]}
           value={remoteValueText(value, property)}
         />
       ) : (
-        <Text numberOfLines={1} style={styles.readOnlyValue}>{remoteValueText(value, property)}</Text>
+        <View style={styles.readOnlyBox}>
+          <Text numberOfLines={2} style={styles.readOnlyValue}>{remoteValueText(value, property)}</Text>
+        </View>
       )}
     </View>
+  );
+}
+
+function ChoiceSheet({
+  title,
+  options,
+  selectedIndex,
+  visible,
+  onSelect,
+  onClose,
+}: {
+  title: string;
+  options: string[];
+  selectedIndex: number;
+  visible: boolean;
+  onSelect: (index: number, option: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={visible}>
+      <View style={styles.pickerSheet}>
+        <View style={styles.pickerSheetHeader}>
+          <View style={styles.grow}>
+            <Text style={styles.pickerSheetTitle}>{title}</Text>
+            <Text style={styles.pickerSheetSubtitle}>Choose one option</Text>
+          </View>
+          <Pressable
+            accessibilityLabel="Close option picker"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={styles.inspectorIconButton}
+          >
+            <MaterialCommunityIcons color={colors.text} name="close" size={22} />
+          </Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.pickerSheetList}>
+          {options.map((option, index) => (
+            <Pressable
+              accessibilityRole="button"
+              key={`${option}:${index}`}
+              onPress={() => onSelect(index, option)}
+              style={[
+                styles.choiceOption,
+                index === selectedIndex && styles.referenceOptionSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.choiceOptionText,
+                  index === selectedIndex && styles.choiceOptionTextSelected,
+                ]}
+              >
+                {option}
+              </Text>
+              {index === selectedIndex ? (
+                <MaterialCommunityIcons color={colors.primary} name="check-circle" size={20} />
+              ) : null}
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
+    </Modal>
   );
 }
 
@@ -818,6 +1312,31 @@ function parseInstances(value: unknown): UnityInstance[] {
       playing: entry.playing === true,
       paused: entry.paused === true,
       compiling: entry.compiling === true,
+      captureViews: parseCaptureViews(entry.captureViews),
+    }));
+}
+
+function parseCaptureViews(value: unknown): UnityCaptureView[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(asRecord)
+    .filter((view): view is Record<string, unknown> => view !== null)
+    .filter(
+      (view) =>
+        (view.kind === "game" || view.kind === "scene") &&
+        typeof view.width === "number" &&
+        typeof view.height === "number" &&
+        view.width > 1 &&
+        view.height > 1,
+    )
+    .map((view) => ({
+      kind: view.kind as UnityViewKind,
+      title: stringValue(view.title) ?? capitalize(view.kind as string),
+      x: numberValue(view.x),
+      y: numberValue(view.y),
+      width: numberValue(view.width),
+      height: numberValue(view.height),
+      pixelsPerPoint: numberValue(view.pixelsPerPoint) || 1,
     }));
 }
 
@@ -910,6 +1429,7 @@ function parseComponent(value: Record<string, unknown>): ComponentSnapshot | nul
         enumOptions: Array.isArray(property.enumOptions)
           ? property.enumOptions.filter((entry): entry is string => typeof entry === "string")
           : [],
+        referenceType: stringValue(property.referenceType) ?? undefined,
       })),
   };
 }
@@ -947,6 +1467,74 @@ function sceneLabel(scenes: string[]): string {
 
 function shortType(typeName: string): string {
   return typeName.split(".").at(-1) ?? typeName;
+}
+
+function friendlyComponentName(typeName: string): string {
+  const type = shortType(typeName);
+  const names: Record<string, string> = {
+    GameObject: "Object",
+    RectTransform: "Rect Transform",
+    TextMeshProUGUI: "Text",
+    TextMeshPro: "Text",
+    CanvasRenderer: "Canvas Renderer",
+    AudioSource: "Audio Source",
+  };
+  return names[type] ?? type.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+}
+
+function componentIcon(typeName: string): keyof typeof MaterialCommunityIcons.glyphMap {
+  const type = typeName.toLowerCase();
+  if (type.includes("transform")) return "axis-arrow";
+  if (type.includes("text")) return "format-text";
+  if (type.includes("camera")) return "camera-outline";
+  if (type.includes("light")) return "lightbulb-outline";
+  if (type.includes("audio")) return "volume-high";
+  if (type.includes("renderer") || type.includes("mesh")) return "cube-outline";
+  if (type.includes("image") || type.includes("sprite")) return "image-outline";
+  if (type.includes("button")) return "gesture-tap-button";
+  return "puzzle-outline";
+}
+
+function propertyIcon(kind: string): keyof typeof MaterialCommunityIcons.glyphMap {
+  if (kind === "boolean") return "toggle-switch-outline";
+  if (kind === "string") return "format-text";
+  if (kind === "objectReference") return "link-variant";
+  if (kind === "color") return "palette-outline";
+  if (kind === "enum") return "format-list-bulleted";
+  if (kind.startsWith("vector") || kind === "quaternion") return "axis-arrow";
+  if (kind.startsWith("rect") || kind.startsWith("bounds")) return "vector-square";
+  if (kind === "integer" || kind === "number") return "numeric";
+  return "code-tags";
+}
+
+function componentLabels(kind: string, count: number): string[] {
+  const labels = kind === "color"
+    ? ["R", "G", "B", "A"]
+    : kind.startsWith("rect")
+      ? ["X", "Y", "W", "H"]
+      : kind.startsWith("bounds")
+        ? ["X", "Y", "Z", "W", "H", "D"]
+        : ["X", "Y", "Z", "W"];
+  return Array.from({ length: count }, (_, index) => labels[index] ?? String(index + 1));
+}
+
+function toggleSetValue(current: Set<string>, value: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+
+function referenceTypeName(serializedType?: string): string | null {
+  if (!serializedType) return null;
+  const pointer = /^PPtr<\$?(.+)>$/.exec(serializedType);
+  return shortType(pointer?.[1] ?? serializedType);
+}
+
+function assetTypeMatches(assetType: string, expectedType: string): boolean {
+  const actual = shortType(assetType).toLowerCase();
+  const expected = shortType(expectedType).toLowerCase();
+  return actual === expected || actual.endsWith(expected) || expected.endsWith(actual);
 }
 
 function capitalize(value: string): string {
@@ -1000,6 +1588,20 @@ const styles = StyleSheet.create({
   instanceText: { ...typography.label, color: colors.text },
   viewerSection: { position: "relative" },
   viewerTop: { position: "absolute", top: spacing.sm, left: spacing.sm },
+  viewerPicker: {
+    position: "absolute",
+    top: spacing.sm,
+    right: spacing.sm,
+    flexDirection: "row",
+    gap: 3,
+    padding: 3,
+    borderRadius: radius.pill,
+    backgroundColor: "rgba(20, 22, 29, 0.84)",
+  },
+  viewerPickerButton: { minHeight: 30, justifyContent: "center", paddingHorizontal: spacing.md, borderRadius: radius.pill },
+  viewerPickerActive: { backgroundColor: colors.primary },
+  viewerPickerText: { ...typography.caption, color: colors.textMuted },
+  viewerPickerTextActive: { color: colors.primaryInk },
   transport: { flexDirection: "row", alignItems: "center", padding: spacing.sm },
   transportButtons: { flexDirection: "row", gap: spacing.xs },
   transportButton: {
@@ -1084,6 +1686,8 @@ const styles = StyleSheet.create({
     paddingRight: spacing.md,
     borderRadius: 9,
   },
+  hierarchyToggle: { width: 24, height: 40, alignItems: "center", justifyContent: "center" },
+  hierarchyTarget: { flex: 1, minHeight: 44, flexDirection: "row", alignItems: "center", gap: spacing.sm },
   hierarchySelected: { backgroundColor: "#34394A" },
   hierarchyText: { ...typography.body, color: colors.textSecondary, flex: 1 },
   hierarchyTextSelected: { color: colors.text },
@@ -1127,6 +1731,32 @@ const styles = StyleSheet.create({
   },
   objectName: { ...typography.heading, color: colors.text },
   objectMeta: { ...typography.caption, color: colors.textMuted },
+  inspectorIconButton: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+  },
+  stagedCard: {
+    gap: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.warning,
+    backgroundColor: "#342E22",
+  },
+  stagedCopy: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  stagedTitle: { ...typography.label, color: colors.warning },
+  stagedDetail: { ...typography.caption, color: colors.textSecondary },
+  inspectorHintRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  inspectorHint: { ...typography.caption, color: colors.textMuted, flex: 1 },
   component: {
     overflow: "hidden",
     borderRadius: radius.md,
@@ -1135,51 +1765,118 @@ const styles = StyleSheet.create({
     backgroundColor: colors.backgroundDeep,
   },
   componentHeader: {
-    minHeight: 52,
+    minHeight: 64,
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
     paddingHorizontal: spacing.md,
-    backgroundColor: colors.surfaceStrong,
+    backgroundColor: colors.surfaceRaised,
+  },
+  componentIcon: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.md,
+    backgroundColor: colors.primarySoft,
   },
   componentName: { ...typography.label, color: colors.text },
   componentType: { ...typography.caption, color: colors.textMuted },
-  property: {
-    minHeight: 64,
+  stagedDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.warning },
+  componentFilters: {
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    gap: spacing.sm,
     paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.borderSoft,
+  },
+  filterChip: {
+    minHeight: 34,
+    justifyContent: "center",
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+  },
+  filterChipActive: { backgroundColor: colors.primary },
+  filterChipText: { ...typography.caption, color: colors.textMuted },
+  filterChipTextActive: { color: colors.primaryInk },
+  noUsefulFields: { gap: spacing.sm, padding: spacing.lg, alignItems: "center" },
+  noUsefulFieldsText: { ...typography.body, color: colors.textMuted, textAlign: "center" },
+  showAllText: { ...typography.label, color: colors.primaryStrong },
+  property: {
+    gap: spacing.sm,
+    padding: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.borderSoft,
+  },
+  propertyStaged: { backgroundColor: "#302B22" },
+  propertyHeader: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  propertyKindIcon: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.sm,
+    backgroundColor: colors.surface,
   },
   propertyCopy: { flex: 1, paddingRight: spacing.md },
   propertyName: { ...typography.label, color: colors.text },
   propertyPath: { ...typography.caption, fontSize: 10, color: colors.textMuted },
+  stagedLabel: { ...typography.caption, fontSize: 9, color: colors.warning, letterSpacing: 0.6 },
   valueInput: {
-    minWidth: 92,
-    maxWidth: 154,
+    width: "100%",
     minHeight: 40,
     paddingHorizontal: spacing.md,
     borderRadius: 9,
     backgroundColor: colors.surface,
     color: colors.text,
     ...typography.mono,
-    textAlign: "right",
+    textAlign: "left",
   },
-  readOnlyValue: { ...typography.mono, color: colors.textMuted, maxWidth: 142, textAlign: "right" },
+  stringInput: { minHeight: 88, maxHeight: 180, textAlignVertical: "top", paddingVertical: spacing.md },
+  readOnlyBox: { minHeight: 40, justifyContent: "center", paddingHorizontal: spacing.md, borderRadius: radius.md, backgroundColor: colors.background },
+  readOnlyValue: { ...typography.mono, color: colors.textMuted },
+  booleanRow: { minHeight: 40, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  controlValueText: { ...typography.body, color: colors.text },
+  controlHintText: { ...typography.caption, color: colors.textMuted },
   boolean: {
-    width: 32,
-    height: 32,
-    alignItems: "center",
+    width: 50,
+    height: 30,
+    padding: 3,
+    alignItems: "flex-end",
     justifyContent: "center",
-    borderRadius: 8,
+    borderRadius: radius.pill,
     backgroundColor: colors.primary,
   },
   booleanOff: {
     backgroundColor: colors.surfaceStrong,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
+  },
+  booleanThumb: { width: 24, height: 24, borderRadius: 12, backgroundColor: colors.textMuted, alignSelf: "flex-start" },
+  booleanThumbOn: { backgroundColor: colors.primaryInk, alignSelf: "flex-end" },
+  fullWidthControl: {
+    width: "100%",
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  componentValueGrid: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
+  componentValueField: { flexGrow: 1, flexBasis: 70, gap: spacing.xs },
+  componentValueLabel: { ...typography.caption, color: colors.textMuted, textAlign: "center" },
+  componentValueInput: {
+    minHeight: 44,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    color: colors.text,
+    ...typography.mono,
+    textAlign: "center",
   },
   enumButton: {
     maxWidth: 154,
@@ -1192,5 +1889,46 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   enumText: { ...typography.mono, color: colors.text, flexShrink: 1 },
+  referenceEditor: { width: 170, alignItems: "stretch", paddingVertical: spacing.sm },
+  referenceButton: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 9,
+    backgroundColor: colors.surface,
+  },
+  referenceButtonText: { ...typography.caption, color: colors.text, flex: 1 },
+  referenceMenu: {
+    marginTop: spacing.xs,
+    padding: spacing.xs,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+  },
+  pickerSheet: { flex: 1, gap: spacing.md, padding: spacing.lg, backgroundColor: colors.backgroundDeep },
+  pickerSheetHeader: { flexDirection: "row", alignItems: "center", gap: spacing.md, paddingTop: spacing.sm },
+  pickerSheetTitle: { ...typography.heading, color: colors.text },
+  pickerSheetSubtitle: { ...typography.body, color: colors.textMuted },
+  pickerSheetList: { gap: spacing.xs, paddingBottom: spacing.xxxl },
+  referenceOption: {
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  referenceOptionSelected: { backgroundColor: colors.primarySoft, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary },
+  referenceOptionIcon: { width: 34, height: 34, alignItems: "center", justifyContent: "center", borderRadius: radius.md, backgroundColor: colors.background },
+  referenceOptionName: { ...typography.label, color: colors.text },
+  referenceOptionPath: { ...typography.caption, color: colors.textMuted },
+  referenceEmpty: { ...typography.caption, color: colors.textMuted, padding: spacing.md, textAlign: "center" },
+  choiceOption: { minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.md, borderRadius: radius.md, backgroundColor: colors.surface },
+  choiceOptionText: { ...typography.body, color: colors.textSecondary },
+  choiceOptionTextSelected: { color: colors.text, fontWeight: "600" },
   undoNote: { ...typography.caption, color: colors.textMuted, textAlign: "center", padding: spacing.sm },
 });

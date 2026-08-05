@@ -35,6 +35,10 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import { BeziMarkdown } from "@/components/bezi-markdown";
+import {
+  ContextPinPicker,
+  ContextPinPills,
+} from "@/components/context-pin-picker";
 import { ActionButton, Card } from "@/components/primitives";
 import { RemoteSurface } from "@/components/remote-surface";
 import { useSession } from "@/context/session-context";
@@ -45,6 +49,21 @@ import {
   reduceBeziLaunchState,
   type BeziLaunchState,
 } from "@/lib/bezi-launch-flow";
+import {
+  applyContextPinMention,
+  buildContextPinAttachments,
+  buildContextPinOptions,
+  filterContextPinOptions,
+  findContextPinMention,
+  hasContextPinToken,
+  parseUnityAssetContext,
+  parseUnityContextInstances,
+  parseUnityHierarchyContext,
+  removeContextPinMention,
+  selectUnityContextInstance,
+  type ContextPin,
+  type UnityContextInstance,
+} from "@/lib/context-pins";
 import {
   explicitThreadSelection,
   explicitWorkspaceSelection,
@@ -158,6 +177,16 @@ export default function BeziMobileScreen() {
   );
   const [destination, setDestination] = useState<BeziDestination>("threads");
   const [composer, setComposer] = useState("");
+  const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
+  const [selectedContextPins, setSelectedContextPins] = useState<ContextPin[]>([]);
+  const [unityContextInstances, setUnityContextInstances] = useState<UnityContextInstance[]>(
+    () => parseUnityContextInstances(asRecord(capabilities?.body.unity)?.instances),
+  );
+  const [unityHierarchyPins, setUnityHierarchyPins] = useState<ContextPin[]>([]);
+  const [unityAssetPins, setUnityAssetPins] = useState<ContextPin[]>([]);
+  const [loadingContextPageIds, setLoadingContextPageIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [sessions, setSessions] = useState<BeziSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatEntry[]>([]);
@@ -191,6 +220,7 @@ export default function BeziMobileScreen() {
   const pendingNewThread = useRef(false);
   const promptRequest = useRef<string | null>(null);
   const promptDraft = useRef<string | null>(null);
+  const promptPins = useRef<ContextPin[] | null>(null);
   const loadRequest = useRef<string | null>(null);
   const listRequest = useRef<string | null>(null);
   const catalogRequest = useRef<string | null>(null);
@@ -213,6 +243,11 @@ export default function BeziMobileScreen() {
   const previousDesktopWorkspaceId = useRef<string | null>(null);
   const previousDesktopProjectId = useRef<string | null>(null);
   const launchStateRef = useRef(launchState);
+  const composerInputRef = useRef<TextInput>(null);
+  const unityInstancesRequest = useRef<string | null>(null);
+  const unityHierarchyRequest = useRef<string | null>(null);
+  const unityAssetsRequest = useRef<string | null>(null);
+  const contextPageRequests = useRef(new Map<string, string>());
   const remoteStream = useRemoteStream("bezi");
   const armCatalogTimeout = useCallback((requestId: string) => {
     if (catalogTimeout.current) clearTimeout(catalogTimeout.current);
@@ -335,6 +370,37 @@ export default function BeziMobileScreen() {
       ),
     [folderExpansionOverrides, selectedWorkspace?.pages],
   );
+  const contextUnityInstance = useMemo(
+    () => selectUnityContextInstance(unityContextInstances, selectedProject?.path),
+    [selectedProject?.path, unityContextInstances],
+  );
+  const contextPinOptions = useMemo(
+    () => buildContextPinOptions({
+      workspaceId: selectedWorkspace?.id ?? null,
+      pages: selectedWorkspace?.pages ?? [],
+      hierarchy: unityHierarchyPins,
+      assets: unityAssetPins,
+    }),
+    [selectedWorkspace?.id, selectedWorkspace?.pages, unityAssetPins, unityHierarchyPins],
+  );
+  const activeContextMention = useMemo(
+    () => findContextPinMention(
+      composer,
+      composerSelection.start,
+      selectedContextPins,
+    ),
+    [composer, composerSelection.start, selectedContextPins],
+  );
+  const filteredContextPins = useMemo(
+    () => activeContextMention
+      ? filterContextPinOptions(contextPinOptions, activeContextMention.query)
+      : [],
+    [activeContextMention, contextPinOptions],
+  );
+  const contextPinsLoading = Boolean(
+    contextUnityInstance &&
+    (unityHierarchyRequest.current || unityAssetsRequest.current),
+  );
   const launchWorkspace =
     workspace.workspaces.find(
       (candidate) => candidate.id === launchState.workspaceId,
@@ -402,6 +468,95 @@ export default function BeziMobileScreen() {
   }, [selectedWorkspace]);
 
   useEffect(() => {
+    const advertised = parseUnityContextInstances(
+      asRecord(capabilities?.body.unity)?.instances,
+    );
+    if (advertised.length > 0) setUnityContextInstances(advertised);
+  }, [capabilities]);
+
+  useEffect(() => {
+    if (!connected) {
+      unityInstancesRequest.current = null;
+      unityHierarchyRequest.current = null;
+      unityAssetsRequest.current = null;
+      setUnityContextInstances([]);
+      setUnityHierarchyPins([]);
+      setUnityAssetPins([]);
+      contextPageRequests.current.clear();
+      setLoadingContextPageIds(new Set());
+      return;
+    }
+    const refresh = () => {
+      if (unityInstancesRequest.current) return;
+      unityInstancesRequest.current = send(
+        "unity.instances.list",
+        {},
+        { kind: "signaling" },
+      );
+    };
+    refresh();
+    const timer = setInterval(refresh, 10_000);
+    return () => clearInterval(timer);
+  }, [connected, send]);
+
+  useEffect(() => {
+    unityHierarchyRequest.current = null;
+    unityAssetsRequest.current = null;
+    setUnityHierarchyPins([]);
+    setUnityAssetPins([]);
+    if (!connected || !contextUnityInstance) return;
+    unityHierarchyRequest.current = send(
+      "unity.hierarchy.snapshot",
+      { instanceId: contextUnityInstance.instanceId },
+      { kind: "signaling" },
+    );
+    unityAssetsRequest.current = send(
+      "unity.assets.snapshot",
+      { instanceId: contextUnityInstance.instanceId },
+      { kind: "signaling" },
+    );
+  }, [connected, contextUnityInstance, send]);
+
+  useEffect(
+    () =>
+      subscribe((payload) => {
+        if (payload.type === "unity.instances") {
+          if (payload.requestId === unityInstancesRequest.current) {
+            unityInstancesRequest.current = null;
+          }
+          setUnityContextInstances(parseUnityContextInstances(payload.body.instances));
+          return;
+        }
+        if (payload.type === "unity.error") {
+          if (payload.requestId === unityHierarchyRequest.current) {
+            unityHierarchyRequest.current = null;
+          }
+          if (payload.requestId === unityAssetsRequest.current) {
+            unityAssetsRequest.current = null;
+          }
+          return;
+        }
+        if (payload.type !== "unity.result" || payload.body.success !== true) return;
+        const result = asRecord(payload.body.result);
+        if (!result || !contextUnityInstance) return;
+        if (payload.requestId === unityHierarchyRequest.current) {
+          unityHierarchyRequest.current = null;
+          setUnityHierarchyPins(
+            parseUnityHierarchyContext(result, contextUnityInstance.projectPath),
+          );
+          return;
+        }
+        if (payload.requestId === unityAssetsRequest.current) {
+          unityAssetsRequest.current = null;
+          setUnityAssetPins(
+            parseUnityAssetContext(result, contextUnityInstance.projectPath),
+          );
+        }
+      }),
+    [contextUnityInstance, subscribe],
+  );
+
+  useEffect(() => {
     if (!connected) {
       // Returning from the background intentionally replaces the relay
       // connection. Keep the populated workspace and thread view while that
@@ -414,6 +569,9 @@ export default function BeziMobileScreen() {
       newRequest.current = null;
       pendingNewThread.current = false;
       promptRequest.current = null;
+      promptDraft.current = null;
+      promptPins.current = null;
+      setSelectedContextPins([]);
       loadRequest.current = null;
       showAgentStatus(null);
       setPermission(null);
@@ -592,6 +750,37 @@ export default function BeziMobileScreen() {
     () =>
       subscribe((payload) => {
         if (!payload.type.startsWith("bezi.")) return;
+        const contextPinId = contextPageRequests.current.get(payload.requestId);
+        if (contextPinId && payload.type === "bezi.page.content") {
+          contextPageRequests.current.delete(payload.requestId);
+          setLoadingContextPageIds((current) => {
+            const next = new Set(current);
+            next.delete(contextPinId);
+            return next;
+          });
+          const markdown = typeof payload.body.markdown === "string"
+            ? payload.body.markdown
+            : "";
+          setSelectedContextPins((current) =>
+            current.map((pin) => pin.id === contextPinId
+              ? { ...pin, content: markdown, mimeType: "text/markdown" }
+              : pin),
+          );
+          return;
+        }
+        if (contextPinId && payload.type === "bezi.error") {
+          contextPageRequests.current.delete(payload.requestId);
+          setLoadingContextPageIds((current) => {
+            const next = new Set(current);
+            next.delete(contextPinId);
+            return next;
+          });
+          setError(
+            stringValue(payload.body.message) ??
+              "Bezi could not load that page as context.",
+          );
+          return;
+        }
         if (
           payload.type === "bezi.catalog" &&
           payload.requestId === catalogRequest.current
@@ -682,15 +871,22 @@ export default function BeziMobileScreen() {
           if (promptFailed) {
             const failedRequestId = promptRequest.current;
             const failedDraft = promptDraft.current;
+            const failedPins = promptPins.current;
             promptRequest.current = null;
             promptDraft.current = null;
+            promptPins.current = null;
             showAgentStatus(null);
             setMessages((current) =>
               current.filter((entry) => entry.id !== failedRequestId),
             );
             if (failedDraft) {
               setComposer((current) => current || failedDraft);
+              setComposerSelection({
+                start: failedDraft.length,
+                end: failedDraft.length,
+              });
             }
+            if (failedPins) setSelectedContextPins(failedPins);
           }
           if (pageFailed) {
             pageRequest.current = null;
@@ -940,8 +1136,10 @@ export default function BeziMobileScreen() {
         if (payload.requestId === promptRequest.current) {
           const completedRequestId = promptRequest.current;
           const completedDraft = promptDraft.current;
+          const completedPins = promptPins.current;
           promptRequest.current = null;
           promptDraft.current = null;
+          promptPins.current = null;
           showAgentStatus(null);
           if (envelope.error) {
             const promptError = asRecord(envelope.error);
@@ -950,7 +1148,12 @@ export default function BeziMobileScreen() {
             );
             if (completedDraft) {
               setComposer((current) => current || completedDraft);
+              setComposerSelection({
+                start: completedDraft.length,
+                end: completedDraft.length,
+              });
             }
+            if (completedPins) setSelectedContextPins(completedPins);
             setError(
               stringValue(promptError?.message) ??
                 "Bezi could not send this message.",
@@ -1152,7 +1355,12 @@ export default function BeziMobileScreen() {
   };
 
   const dispatchPrompt = useCallback(
-    (pending: { sessionId: string; text: string }) => {
+    (pending: {
+      sessionId: string;
+      text: string;
+      attachments: ReturnType<typeof buildContextPinAttachments>;
+      pins: ContextPin[];
+    }) => {
       if (
         !connected ||
         promptRequest.current ||
@@ -1171,7 +1379,7 @@ export default function BeziMobileScreen() {
         {
           sessionId: pending.sessionId,
           text: pending.text,
-          attachments: [],
+          attachments: pending.attachments,
         },
         { kind: "signaling" },
       );
@@ -1182,6 +1390,7 @@ export default function BeziMobileScreen() {
 
       promptRequest.current = requestId;
       promptDraft.current = pending.text;
+      promptPins.current = pending.pins;
       setError(null);
       showAgentStatus({ label: "Thinking", active: true });
       setMessages((current) => [
@@ -1191,16 +1400,106 @@ export default function BeziMobileScreen() {
       setComposer((current) =>
         current.trim() === pending.text ? "" : current,
       );
+      setComposerSelection({ start: 0, end: 0 });
+      setSelectedContextPins([]);
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       return true;
     },
     [connected, send, showAgentStatus],
   );
 
+  const updateComposer = (nextText: string) => {
+    const delta = nextText.length - composer.length;
+    const nextCaret = Math.max(
+      0,
+      Math.min(nextText.length, composerSelection.end + delta),
+    );
+    setComposer(nextText);
+    setComposerSelection({ start: nextCaret, end: nextCaret });
+    const remainingPins = selectedContextPins.filter((pin) =>
+      hasContextPinToken(nextText, pin),
+    );
+    const remainingIds = new Set(remainingPins.map((pin) => pin.id));
+    for (const [requestId, pinId] of contextPageRequests.current) {
+      if (!remainingIds.has(pinId)) contextPageRequests.current.delete(requestId);
+    }
+    setLoadingContextPageIds((current) =>
+      new Set([...current].filter((pinId) => remainingIds.has(pinId))),
+    );
+    setSelectedContextPins(remainingPins);
+  };
+
+  const selectContextPin = (pin: ContextPin) => {
+    if (!activeContextMention) return;
+    const alreadySelected = selectedContextPins.some(
+      (candidate) => candidate.id === pin.id,
+    );
+    const next = applyContextPinMention(composer, activeContextMention, pin);
+    setComposer(next.text);
+    setComposerSelection({ start: next.caret, end: next.caret });
+    setSelectedContextPins((current) =>
+      current.some((candidate) => candidate.id === pin.id)
+        ? current
+        : [...current, pin],
+    );
+    if (!alreadySelected && pin.source === "bezi" && pin.pageId) {
+      const requestId = send(
+        "bezi.page.get",
+        {
+          pageId: pin.pageId,
+          ancestorIds: workspaceAncestorIds(
+            selectedWorkspace?.pages ?? [],
+            pin.pageId,
+          ),
+        },
+        { kind: "signaling" },
+      );
+      if (requestId) {
+        contextPageRequests.current.set(requestId, pin.id);
+        setLoadingContextPageIds((current) => new Set(current).add(pin.id));
+      }
+    }
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+    void Haptics.selectionAsync();
+  };
+
+  const insertContextMentionTrigger = () => {
+    const start = composerSelection.start;
+    const end = composerSelection.end;
+    const nextText = `${composer.slice(0, start)}@${composer.slice(end)}`;
+    const caret = start + 1;
+    setComposer(nextText);
+    setComposerSelection({ start: caret, end: caret });
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  };
+
+  const removeContextPin = (pin: ContextPin) => {
+    const next = removeContextPinMention(composer, pin);
+    setComposer(next.text);
+    setComposerSelection({ start: next.caret, end: next.caret });
+    setSelectedContextPins((current) =>
+      current.filter((candidate) => candidate.id !== pin.id),
+    );
+    for (const [requestId, pinId] of contextPageRequests.current) {
+      if (pinId === pin.id) contextPageRequests.current.delete(requestId);
+    }
+    setLoadingContextPageIds((current) => {
+      const nextIds = new Set(current);
+      nextIds.delete(pin.id);
+      return nextIds;
+    });
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  };
+
   const submitPrompt = () => {
     const text = composer.trim();
     if (!text || !connected || !activeSessionId) return;
-    dispatchPrompt({ sessionId: activeSessionId, text });
+    dispatchPrompt({
+      sessionId: activeSessionId,
+      text,
+      attachments: buildContextPinAttachments(selectedContextPins),
+      pins: selectedContextPins,
+    });
   };
 
   const selectChoice = (kind: "mode" | "model", choice: AdvertisedChoice) => {
@@ -1317,6 +1616,7 @@ export default function BeziMobileScreen() {
     !composer.trim() ||
     !connected ||
     !activeSessionId ||
+    loadingContextPageIds.size > 0 ||
     Boolean(promptRequest.current);
 
   return (
@@ -1523,21 +1823,40 @@ export default function BeziMobileScreen() {
               ]}
             >
               <View style={styles.composer}>
+                {activeContextMention ? (
+                  <ContextPinPicker
+                    loading={contextPinsLoading}
+                    onSelect={selectContextPin}
+                    pins={filteredContextPins}
+                    query={activeContextMention.query}
+                    unityConnected={Boolean(contextUnityInstance)}
+                  />
+                ) : null}
+                <ContextPinPills
+                  loadingIds={loadingContextPageIds}
+                  onRemove={removeContextPin}
+                  pins={selectedContextPins}
+                />
                 <TextInput
                   accessibilityLabel="Message Bezi"
                   editable={connected && Boolean(activeSessionId)}
                   multiline
-                  onChangeText={setComposer}
+                  onChangeText={updateComposer}
                   onFocus={() => {
                     timelinePinned.current = true;
                     requestAnimationFrame(() => {
                       timelineRef.current?.scrollToEnd({ animated: true });
                     });
                   }}
+                  onSelectionChange={({ nativeEvent }) => {
+                    setComposerSelection(nativeEvent.selection);
+                  }}
                   placeholder={
                     activeSessionId ? "Message Bezi" : "Open a thread to start prompting"
                   }
                   placeholderTextColor={colors.textMuted}
+                  ref={composerInputRef}
+                  selection={composerSelection}
                   style={styles.composerInput}
                   value={composer}
                 />
@@ -1552,6 +1871,19 @@ export default function BeziMobileScreen() {
                       color={colors.textMuted}
                       name="plus"
                       size={22}
+                    />
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel="Mention Unity or Bezi context"
+                    accessibilityRole="button"
+                    disabled={!connected || !activeSessionId}
+                    onPress={insertContextMentionTrigger}
+                    style={styles.composerRoundButton}
+                  >
+                    <MaterialCommunityIcons
+                      color={colors.textSecondary}
+                      name="at"
+                      size={21}
                     />
                   </Pressable>
                   <View style={styles.composerChoices}>

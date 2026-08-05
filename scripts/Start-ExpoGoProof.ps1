@@ -531,12 +531,36 @@ finally {
 $relayPort = Get-AvailablePort -PreferredPort $relayPort
 $metroPort = Get-AvailablePort -PreferredPort $metroPort
 $muxPort = Get-AvailablePort -PreferredPort $muxPort
-$cloudflared = (Get-Command cloudflared -ErrorAction Stop).Source
-$pnpmCommand = (Get-Command pnpm -ErrorAction Stop).Source
-$pnpm = Join-Path (Split-Path $pnpmCommand) "pnpm.cmd"
-if (-not (Test-Path -LiteralPath $pnpm)) {
-    throw "pnpm.cmd was not found beside $pnpmCommand."
+$cloudflaredCandidates = @(
+    (Get-Command cloudflared -ErrorAction SilentlyContinue).Source,
+    (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\cloudflared.exe"),
+    (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe")
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$cloudflared = $cloudflaredCandidates | Select-Object -First 1
+if (-not $cloudflared) {
+    throw "cloudflared is missing. Run Bezi Buddy Setup again to repair prerequisites."
 }
+
+$pnpmCandidates = @(
+    (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source,
+    (Join-Path $env:APPDATA "npm\pnpm.cmd"),
+    (Join-Path $env:LOCALAPPDATA "pnpm\pnpm.cmd")
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$pnpm = $pnpmCandidates | Select-Object -First 1
+if (-not $pnpm) {
+    throw "pnpm is missing. Run Bezi Buddy Setup again to repair prerequisites."
+}
+
+$nodeCandidates = @(
+    (Get-Command node.exe -ErrorAction SilentlyContinue).Source,
+    (Join-Path $env:ProgramFiles "nodejs\node.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe")
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$node = $nodeCandidates | Select-Object -First 1
+if (-not $node) {
+    throw "Node.js is missing. Run Bezi Buddy Setup again to repair prerequisites."
+}
+$env:PATH = "$(Split-Path $node);$(Split-Path $pnpm);$(Split-Path $cloudflared);$env:PATH"
 $proofToken = New-ProofToken
 $proofHostId = Get-ProofIdentifier -Name "proof-host-id" -Prefix "host-proof-"
 $proofMobileDeviceId = Get-ProofIdentifier -Name "proof-mobile-id" -Prefix "mobile-proof-"
@@ -596,7 +620,7 @@ try {
     $claimBody = @{
         claimCode = $proofClaimCode
         mobileDeviceId = $proofMobileDeviceId
-        deviceName = "Expo Go proof iPhone"
+        deviceName = "Expo Go proof phone"
         keyFingerprint = Get-Sha256Base64Url -Value $proofPairSecret
     } | ConvertTo-Json -Compress
     Invoke-RestMethod `
@@ -609,7 +633,7 @@ try {
 
     $mux = Start-ProofProcess `
         -Name "proof-mux" `
-        -FilePath (Get-Command node -ErrorAction Stop).Source `
+        -FilePath $node `
         -Arguments @(
             "scripts/proof-mux.mjs", "--listen", "$muxPort",
             "--metro", "$metroPort", "--relay", "$relayPort"
@@ -699,7 +723,14 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
 
     if (-not $SkipCompanion) {
         Write-LauncherProgress -Stage "companion" -Message "Launching the Bezi companion"
-        $gstreamer = Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\msvc_x86_64"
+        $gstreamerCandidates = @(
+            (Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\msvc_x86_64"),
+            (Join-Path $env:ProgramFiles "gstreamer\1.0\msvc_x86_64"),
+            "C:\gstreamer\1.0\msvc_x86_64"
+        )
+        $gstreamer = $gstreamerCandidates |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_ "bin\gstreamer-1.0-0.dll") } |
+            Select-Object -First 1
         $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
         if (-not (Test-Path -LiteralPath (Join-Path $gstreamer "bin\gstreamer-1.0-0.dll"))) {
             throw "The native companion requires the GStreamer MSVC x64 runtime."
@@ -786,7 +817,7 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
     if ($ExitAfterReady) {
         $env:BEZI_REMOTE_RELAY_URL = $proofUrl
         $env:BEZI_REMOTE_OWNER_TOKEN = $proofToken
-        node --use-system-ca scripts/smoke-relay.mjs
+        & $node --use-system-ca scripts/smoke-relay.mjs
         if ($LASTEXITCODE -ne 0) {
             throw "The public Quick Tunnel WebSocket smoke test failed."
         }

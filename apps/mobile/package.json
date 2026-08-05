@@ -6,6 +6,8 @@
   "scripts": {
     "start": "expo start --tunnel",
     "start:lan": "expo start",
+    "android": "expo start --android",
+    "build:android:apk": "eas build --platform android --profile preview",
     "build": "expo export --platform web --output-dir dist-web",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

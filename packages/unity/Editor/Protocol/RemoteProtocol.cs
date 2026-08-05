@@ -23,6 +23,7 @@ namespace Bezi.Remote.Editor.Protocol
         public bool playing;
         public bool paused;
         public bool compiling;
+        public CaptureView[] captureViews;
     }
 
     [Serializable]
@@ -34,6 +35,19 @@ namespace Bezi.Remote.Editor.Protocol
         public bool playing;
         public bool paused;
         public bool compiling;
+        public CaptureView[] captureViews;
+    }
+
+    [Serializable]
+    internal sealed class CaptureView
+    {
+        public string kind;
+        public string title;
+        public float x;
+        public float y;
+        public float width;
+        public float height;
+        public float pixelsPerPoint;
     }
 
     [Serializable]
@@ -70,6 +84,12 @@ namespace Bezi.Remote.Editor.Protocol
     internal sealed class PlayRequest
     {
         public string operation;
+    }
+
+    [Serializable]
+    internal sealed class CaptureViewRequest
+    {
+        public string kind;
     }
 
     [Serializable]
@@ -143,6 +163,7 @@ namespace Bezi.Remote.Editor.Protocol
         public bool readOnly;
         public RemoteValue value;
         public string[] enumOptions;
+        public string referenceType;
     }
 
     [Serializable]

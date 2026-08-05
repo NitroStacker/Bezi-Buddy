@@ -22,7 +22,8 @@ namespace Bezi.Remote.Editor.Bridge
                 openScenes = OpenScenePaths(),
                 playing = EditorApplication.isPlaying,
                 paused = EditorApplication.isPaused,
-                compiling = EditorApplication.isCompiling
+                compiling = EditorApplication.isCompiling,
+                captureViews = CaptureViews()
             };
         }
 
@@ -34,7 +35,8 @@ namespace Bezi.Remote.Editor.Bridge
                 openScenes = OpenScenePaths(),
                 playing = EditorApplication.isPlaying,
                 paused = EditorApplication.isPaused,
-                compiling = EditorApplication.isCompiling
+                compiling = EditorApplication.isCompiling,
+                captureViews = CaptureViews()
             };
         }
 
@@ -46,6 +48,35 @@ namespace Bezi.Remote.Editor.Bridge
                 .Select(scene => string.IsNullOrEmpty(scene.path) ? scene.name : scene.path)
                 .ToArray();
         }
+
+        private static CaptureView[] CaptureViews()
+        {
+            return Resources.FindObjectsOfTypeAll<EditorWindow>()
+                .Select(window =>
+                {
+                    var fullName = window.GetType().FullName;
+                    var kind = fullName == "UnityEditor.GameView"
+                        ? "game"
+                        : window is SceneView ? "scene" : null;
+                    if (kind == null)
+                    {
+                        return null;
+                    }
+                    var position = window.position;
+                    return new CaptureView
+                    {
+                        kind = kind,
+                        title = window.titleContent != null ? window.titleContent.text : kind,
+                        x = position.x,
+                        y = position.y,
+                        width = position.width,
+                        height = position.height,
+                        pixelsPerPoint = EditorGUIUtility.pixelsPerPoint
+                    };
+                })
+                .Where(view => view != null && view.width > 1f && view.height > 1f)
+                .OrderBy(view => view.kind == "game" ? 0 : 1)
+                .ToArray();
+        }
     }
 }
-

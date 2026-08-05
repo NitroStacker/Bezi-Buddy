@@ -12,7 +12,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "app.beziremote.mobile",
       "infoPlist": {
-        "NSCameraUsageDescription": "Scan the private QR code displayed by your Bezi companion to pair this iPhone with your PC."
+        "NSCameraUsageDescription": "Scan the private QR code displayed by your Bezi companion to pair this phone with your PC."
       }
     },
     "android": {

@@ -1,4 +1,4 @@
-# Expo Go proof runbook
+# Android and iOS Expo Go proof runbook
 
 ## 1. Local validation
 
@@ -52,11 +52,10 @@ It uses the release companion binary, displays the same Expo Go URL, and copies
 that URL to the Windows clipboard. Keep its console window open while using the
 app; press Ctrl+C there to stop the companion and all relay processes.
 
-The first launch also offers one-time Gmail delivery setup. Create a Google App
-Password named `Bezi Buddy` in the browser window, then paste it into the hidden
-terminal prompt. The launcher sends a test message before saving the
-Windows-user-encrypted credential. Once configured, each new Expo Go URL is
-emailed automatically after Cloudflare and Metro are ready.
+Gmail delivery is optional. Run the launcher with `--configure-email`, create a
+Google App Password named `Bezi Buddy`, then paste it into the hidden terminal
+prompt. Once configured, each new Expo Go URL is emailed automatically after
+Cloudflare and Metro are ready.
 
 No Wrangler login, Cloudflare account, deployed Worker, remote D1 database,
 TURN key, or Cloudflare secret is required for Stage A. Quick Tunnel hostnames
@@ -67,18 +66,19 @@ and all other paths to Expo Metro, including WebSocket upgrades.
 
 ## 3. Pairing
 
-1. Open the printed `exp://...trycloudflare.com` URL in Expo Go.
+1. Install Expo Go from Google Play or the App Store, then open the printed
+   `exp://...trycloudflare.com` URL.
 2. In the companion, click **Create private pairing code**. The proof URL and
    development token are prefilled by the launcher.
 3. In Expo Go, open Settings from Bezi or Unity mode and scan the QR.
 4. Confirm the paired host appears and connect.
 
-The E2EE pairing secret is held in Windows Credential Manager and iOS
-SecureStore, not in the local relay database.
+The E2EE pairing secret is held in Windows Credential Manager and the phone's
+platform-backed SecureStore, not in the local relay database.
 
 ## 4. Required physical proof
 
-Put the iPhone on cellular and the PC on a different network. Pass all of these
+Put the Android phone or iPhone on cellular and the PC on a different network. Pass all of these
 before declaring Stage A complete:
 
 - Bezi mode lists/resumes a session, sends a prompt, streams the response, and

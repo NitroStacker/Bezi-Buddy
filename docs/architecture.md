@@ -26,7 +26,7 @@ The Windows companion is the only process allowed to:
 
 ```mermaid
 flowchart LR
-  M["Expo Go mobile app"] <-->|"One temporary HTTPS/WSS hostname"| Q["Cloudflare Quick Tunnel"]
+  M["Expo Go mobile app on Android or iOS"] <-->|"One temporary HTTPS/WSS hostname"| Q["Cloudflare Quick Tunnel"]
   Q <-->|"Metro and E2EE signaling paths"| X["Local proof mux"]
   X --> R["Local Worker, D1, and Durable Object"]
   R <-->|"E2EE control and signaling"| H["Windows companion"]

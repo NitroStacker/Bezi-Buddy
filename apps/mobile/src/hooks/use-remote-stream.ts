@@ -5,52 +5,92 @@ import { useSession } from "@/context/session-context";
 export function useRemoteStream(
   target: "bezi" | "unity",
   instanceId?: string | null,
+  source?: "game" | "scene",
 ) {
   const { connected, send, subscribe } = useSession();
   const startRequest = useRef<string | null>(null);
+  const activateRequest = useRef<string | null>(null);
+  const activateTarget = useRef<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
+  const [activatedTarget, setActivatedTarget] = useState<string | null>(null);
   const [signal, setSignal] = useState<WebRtcSignal | undefined>();
+  const targetKey = target === "unity" && instanceId ? `${instanceId}:${source ?? "game"}` : null;
+  const targetReady = target !== "unity" || activatedTarget === targetKey;
 
   useEffect(() => {
     if (!connected) {
       startRequest.current = null;
       return;
     }
-    if (target === "unity" && !instanceId) return;
+    if (target === "unity" && (!instanceId || !targetReady)) return;
     if (!viewerReady || startRequest.current) return;
     startRequest.current = send(
       "stream.start",
       {
         target,
         instanceId: instanceId ?? undefined,
-        preset: target === "unity" ? "balanced" : "editor",
+        source: target === "unity" ? source ?? "game" : undefined,
+        preset: target === "unity" ? (source === "scene" ? "balanced" : "game") : "editor",
       },
       { kind: "signaling" },
     );
-  }, [connected, instanceId, send, target, viewerReady]);
+  }, [connected, instanceId, send, source, target, targetReady, viewerReady]);
+
+  useEffect(() => {
+    if (
+      target !== "unity" ||
+      !connected ||
+      !viewerReady ||
+      !instanceId ||
+      activateRequest.current ||
+      targetReady
+    ) {
+      return;
+    }
+    activateTarget.current = targetKey;
+    activateRequest.current = send(
+      "unity.capture.view.activate",
+      { instanceId, kind: source ?? "game" },
+      { kind: "signaling" },
+    );
+  }, [connected, instanceId, send, source, target, targetKey, targetReady, viewerReady]);
 
   useEffect(() => {
     startRequest.current = null;
+    activateRequest.current = null;
+    activateTarget.current = null;
+    setActivatedTarget(null);
     setSignal(undefined);
-  }, [instanceId, target]);
+  }, [instanceId, source, target]);
 
   useEffect(
     () => () => {
       if (startRequest.current) {
         send(
           "stream.stop",
-          { target, instanceId: instanceId ?? undefined },
+          { target, instanceId: instanceId ?? undefined, source },
           { kind: "signaling" },
         );
         startRequest.current = null;
       }
     },
-    [instanceId, send, target],
+    [instanceId, send, source, target],
   );
 
   useEffect(
     () =>
       subscribe((payload) => {
+        if (payload.requestId === activateRequest.current) {
+          if (payload.type === "unity.result" && payload.body.success === true) {
+            activateRequest.current = null;
+            setActivatedTarget(activateTarget.current);
+            activateTarget.current = null;
+          } else if (payload.type === "unity.error") {
+            activateRequest.current = null;
+            activateTarget.current = null;
+          }
+          return;
+        }
         if (payload.requestId !== startRequest.current) return;
         if (payload.type === "stream.offer") {
           const sdp = payload.body.sdp;
@@ -99,7 +139,7 @@ export function useRemoteStream(
       if (message.type === "viewer.answer" && isRecord(message.sdp)) {
         send(
           "stream.answer",
-          { target, instanceId: instanceId ?? undefined, sdp: message.sdp },
+          { target, instanceId: instanceId ?? undefined, source, sdp: message.sdp },
           { kind: "signaling" },
         );
       } else if (message.type === "viewer.ice" && isRecord(message.candidate)) {
@@ -108,13 +148,14 @@ export function useRemoteStream(
           {
             target,
             instanceId: instanceId ?? undefined,
+            source,
             candidate: message.candidate,
           },
           { kind: "signaling" },
         );
       }
     },
-    [connected, instanceId, send, target],
+    [connected, instanceId, send, source, target],
   );
 
   return { signal, onSignal };

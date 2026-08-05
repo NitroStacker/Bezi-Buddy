@@ -56,8 +56,14 @@ const keys = deriveSessionKeys({
 const prefix = randomBytes(4);
 let sequence = 0;
 const beziOnly = process.argv.includes("--bezi-only");
+const unityOnly = process.argv.includes("--unity-only");
 const completePages = process.argv.includes("--complete-pages");
 const catalogOnly = process.argv.includes("--catalog-only");
+const streamSmoke = process.argv.includes("--stream-smoke");
+const inspectorSmoke = process.argv.includes("--inspector-smoke");
+const requestedUnityProject = process.argv
+  .find((argument) => argument.startsWith("--unity-project="))
+  ?.slice("--unity-project=".length) ?? "Battle Soccer";
 let leaseHeld = false;
 
 if (!beziOnly) {
@@ -113,6 +119,169 @@ const capabilities = await nextPayload(
     payload.requestId === helloRequest && payload.type === "system.capabilities",
 );
 const instances = capabilities.body.unity?.instances ?? [];
+
+if (unityOnly) {
+  const instance = instances.find(
+    (candidate) =>
+      candidate.projectName.toLowerCase() === requestedUnityProject.toLowerCase() ||
+      candidate.projectPath.toLowerCase() === requestedUnityProject.toLowerCase(),
+  );
+  if (!instance) {
+    throw new Error(
+      `Unity project ${requestedUnityProject} was not advertised. Connected: ${instances
+        .map((candidate) => `${candidate.projectName} (${candidate.projectPath})`)
+        .join(", ") || "none"}`,
+    );
+  }
+
+  const hierarchyRequest = send(
+    "unity.hierarchy.snapshot",
+    { instanceId: instance.instanceId },
+    "signaling",
+  );
+  stage = `loading ${instance.projectName} hierarchy`;
+  const hierarchy = await nextPayload(
+    (payload) => payload.requestId === hierarchyRequest && payload.type === "unity.result",
+  );
+  const nodes = hierarchy.body.result?.nodes ?? [];
+  if (nodes.length === 0) throw new Error("The live Unity hierarchy was empty");
+
+  const assetsRequest = send(
+    "unity.assets.snapshot",
+    { instanceId: instance.instanceId },
+    "signaling",
+  );
+  stage = `loading ${instance.projectName} assets`;
+  const assets = await nextPayload(
+    (payload) => payload.requestId === assetsRequest && payload.type === "unity.result",
+    20_000,
+  );
+  const projectAssets = assets.body.result?.assets ?? [];
+  if (projectAssets.length === 0) throw new Error("The live Unity asset index was empty");
+
+  let streamOffer = null;
+  if (streamSmoke) {
+    const source = instance.captureViews?.some((view) => view.kind === "game") ? "game" : "scene";
+    const activateRequest = send(
+      "unity.capture.view.activate",
+      { instanceId: instance.instanceId, kind: source },
+      "signaling",
+    );
+    stage = `activating ${source} view for ${instance.projectName}`;
+    const activated = await nextPayload(
+      (payload) => payload.requestId === activateRequest && payload.type === "unity.result",
+      10_000,
+    );
+    if (activated.body.success !== true) {
+      throw new Error(`Unity could not activate its ${source} view`);
+    }
+    const streamRequest = send(
+      "stream.start",
+      { target: "unity", instanceId: instance.instanceId, source, preset: "balanced" },
+      "signaling",
+    );
+    stage = `starting ${source} view stream for ${instance.projectName}`;
+    const offer = await nextPayload(
+      (payload) => payload.requestId === streamRequest && payload.type === "stream.offer",
+      20_000,
+    );
+    const sdp = offer.body.sdp?.sdp ?? "";
+    if (!sdp.includes("m=video") || !sdp.includes("H264")) {
+      throw new Error("The Unity stream offer did not advertise H.264 video");
+    }
+    streamOffer = { source, h264Video: true };
+    const stopRequest = send(
+      "stream.stop",
+      { target: "unity", instanceId: instance.instanceId, source },
+      "signaling",
+    );
+    await nextPayload(
+      (payload) => payload.requestId === stopRequest && payload.type === "stream.stopped",
+      10_000,
+    );
+  }
+
+  let inspectorCoverage = null;
+  if (inspectorSmoke) {
+    const preferred = nodes.filter((node) => /text|label|title|score|caption|button/i.test(node.name));
+    const candidates = [...preferred, ...nodes]
+      .filter((node, index, all) => all.findIndex((candidate) => candidate.id === node.id) === index)
+      .slice(0, 200);
+    const textMatches = [];
+    const fontMatches = [];
+    for (const node of candidates) {
+      const inspectorRequest = send(
+        "unity.inspector.snapshot",
+        { instanceId: instance.instanceId, targetId: node.id },
+        "signaling",
+      );
+      stage = `inspecting ${node.name}`;
+      const response = await nextPayload(
+        (payload) => payload.requestId === inspectorRequest && payload.type === "unity.result",
+        10_000,
+      );
+      if (response.body.success !== true) continue;
+      const snapshot = response.body.result ?? {};
+      const groups = [snapshot, ...(snapshot.components ?? [])];
+      const properties = groups.flatMap((group) => group.properties ?? []);
+      const textProperty = properties.find(
+        (property) =>
+          property.kind === "string" &&
+          property.readOnly !== true &&
+          /(^|[._ ])text($|[._ ])|label|title|caption/i.test(
+            `${property.path} ${property.displayName}`,
+          ),
+      );
+      const fontProperty = properties.find(
+        (property) =>
+          property.kind === "objectReference" &&
+          property.readOnly !== true &&
+          /font/i.test(`${property.path} ${property.displayName} ${property.referenceType ?? ""}`),
+      );
+      if (textProperty) textMatches.push({ object: node.name, property: textProperty.path });
+      if (fontProperty) {
+        fontMatches.push({ object: node.name, property: fontProperty.path });
+      }
+      if (textProperty && fontProperty) {
+        inspectorCoverage = {
+          object: node.name,
+          textProperty: textProperty.path,
+          fontProperty: fontProperty.path,
+          fontReferenceType: fontProperty.referenceType,
+        };
+        break;
+      }
+    }
+    if (!inspectorCoverage) {
+      throw new Error(
+        `No live Unity text object exposed both editable text and font properties. ` +
+          `Text matches: ${JSON.stringify(textMatches.slice(0, 10))}; ` +
+          `font matches: ${JSON.stringify(fontMatches.slice(0, 10))}`,
+      );
+    }
+  }
+
+  if (leaseHeld) socket.send(JSON.stringify({ type: "relay.lease.release" }));
+  socket.close();
+  process.stdout.write(`${JSON.stringify({
+    unityProject: instance.projectName,
+    unityProjectPath: instance.projectPath,
+    stream: capabilities.body.stream ?? null,
+    openScenes: instance.openScenes,
+    captureViews: instance.captureViews ?? [],
+    streamOffer,
+    inspectorCoverage,
+    hierarchyCount: nodes.length,
+    hierarchySample: nodes.slice(0, 10).map((node) => node.name),
+    assetCount: projectAssets.length,
+    assetSample: projectAssets.slice(0, 10).map((asset) => ({
+      name: asset.name,
+      path: asset.path,
+      typeName: asset.typeName,
+    })),
+  }, null, 2)}\n`);
+  process.exit(0);
+}
 
 const catalogRequest = send(
   "bezi.catalog.get",
@@ -385,10 +554,12 @@ if (beziOnly) {
   process.exit(0);
 }
 
-if (!instances.some((instance) => instance.projectName === "Battle Soccer")) {
-  throw new Error("The running Battle Soccer Unity Editor was not advertised");
+if (!instances.some((instance) => instance.projectName === requestedUnityProject)) {
+  throw new Error(`The running ${requestedUnityProject} Unity Editor was not advertised`);
 }
-const instanceId = instances.find((instance) => instance.projectName === "Battle Soccer").instanceId;
+const instanceId = instances.find(
+  (instance) => instance.projectName === requestedUnityProject,
+).instanceId;
 const hierarchyRequest = send("unity.hierarchy.snapshot", { instanceId }, "signaling");
 stage = "loading Unity hierarchy";
 const hierarchy = await nextPayload(

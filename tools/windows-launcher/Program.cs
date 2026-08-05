@@ -113,17 +113,10 @@ internal static class Program
 
         var forceEmailSetup = args.Any(argument =>
             argument.Equals("--configure-email", StringComparison.OrdinalIgnoreCase));
-        if (forceEmailSetup || !IsEmailConfigured())
+        if (forceEmailSetup)
         {
             var setupExitCode = await RunEmailSetupAsync(workspace);
-            if (forceEmailSetup)
-            {
-                return setupExitCode;
-            }
-            if (setupExitCode is not 0 and not 2)
-            {
-                return Fail("Gmail delivery setup did not complete.");
-            }
+            return setupExitCode;
         }
 
         await PlayWelcomeAnimationAsync();
@@ -525,7 +518,7 @@ internal static class Program
         Console.ResetColor();
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("       Open this URL in Expo Go:");
+        Console.WriteLine("       Open this URL in Expo Go on Android or iPhone:");
         Console.ForegroundColor = ConsoleColor.White;
         Console.WriteLine($"       {_expoUrl}");
         Console.ResetColor();

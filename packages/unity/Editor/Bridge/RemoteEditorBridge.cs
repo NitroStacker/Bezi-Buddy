@@ -63,6 +63,10 @@ namespace Bezi.Remote.Editor.Bridge
                 }
 
                 Outbound.Enqueue(JsonUtility.ToJson(result));
+                if (command.action == "capture.view.activate")
+                {
+                    _nextStatusAt = 0;
+                }
             }
 
             if (_connected && EditorApplication.timeSinceStartup >= _nextStatusAt)

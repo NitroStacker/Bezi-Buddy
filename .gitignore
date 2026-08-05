@@ -18,6 +18,9 @@ apps/companion/src-tauri/target-*/
 apps/companion/src-tauri/gen/
 tools/windows-launcher/bin/
 tools/windows-launcher/obj/
+tools/windows-setup/bin/
+tools/windows-setup/obj/
+tools/windows-setup/payload/*.zip
 
 # Unity generated folders
 Library/

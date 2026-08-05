@@ -454,22 +454,24 @@ async fn dispatch_payload(
 
     if message_type == "stream.start" {
         let target = body.get("target").and_then(Value::as_str).unwrap_or("bezi");
-        let process_id = match target {
-            "bezi" => bezi::read_descriptor().map(|descriptor| descriptor.pid),
+        let capture_target = match target {
+            "bezi" => bezi::read_descriptor().map(|descriptor| (descriptor.pid, None)),
             "unity" => {
                 let instance_id = body
                     .get("instanceId")
                     .and_then(Value::as_str)
                     .unwrap_or("active");
-                unity.process_id_for(instance_id).await
+                let source = body.get("source").and_then(Value::as_str).unwrap_or("game");
+                unity.capture_target_for(instance_id, source).await
             }
             _ => Err("The requested stream target is unsupported".to_owned()),
         };
-        let result = process_id.and_then(|process_id| {
+        let result = capture_target.and_then(|(process_id, region)| {
             media.start(
                 device_id,
                 &request_id,
                 process_id,
+                region,
                 stream::StreamPreset::parse(body.get("preset").and_then(Value::as_str)),
             )
         });
@@ -850,6 +852,10 @@ fn unity_command(
         "unity.inspector.snapshot" => Some((
             "inspector.snapshot",
             json!({ "targetId": body.get("targetId")? }),
+        )),
+        "unity.capture.view.activate" => Some((
+            "capture.view.activate",
+            json!({ "kind": body.get("kind")? }),
         )),
         "unity.property.apply" => {
             let value = normalize_unity_value(body.get("value")?)?;

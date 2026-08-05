@@ -7,9 +7,9 @@
     <AssemblyName>Bezi Buddy</AssemblyName>
     <RootNamespace>BeziRemoteLauncher</RootNamespace>
     <ApplicationIcon>assets\bezi-buddy.ico</ApplicationIcon>
-    <Description>Starts the Bezi companion and Expo Go Cloudflare relay.</Description>
+    <Description>Starts Bezi Buddy for Android or iPhone with Bezi and Unity.</Description>
     <Product>Bezi Buddy</Product>
     <Company>Bezi Remote</Company>
-    <Version>0.1.2</Version>
+    <Version>0.2.0</Version>
   </PropertyGroup>
 </Project>

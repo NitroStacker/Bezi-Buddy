@@ -14,6 +14,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  Platform,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -43,7 +44,7 @@ export default function PairScreen() {
       const settings = await loadSecureSettings();
       const hostId = await new RelayClient(settings).claimPairing(
         pairing,
-        "Personal iPhone",
+        Platform.OS === "android" ? "Personal Android phone" : "Personal iPhone",
       );
       await queryClient.invalidateQueries({ queryKey: ["hosts"] });
       selectHost(hostId);

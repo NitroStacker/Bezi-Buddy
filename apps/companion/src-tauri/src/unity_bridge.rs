@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, sync::Arc};
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,20 @@ pub struct UnityInstance {
     pub playing: bool,
     pub paused: bool,
     pub compiling: bool,
+    pub capture_views: Vec<UnityCaptureView>,
     pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnityCaptureView {
+    pub kind: String,
+    pub title: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub pixels_per_point: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +64,8 @@ enum UnityMessage {
         playing: bool,
         paused: bool,
         compiling: bool,
+        #[serde(default, rename = "captureViews")]
+        capture_views: Vec<UnityCaptureView>,
     },
     Pong {
         #[serde(rename = "instanceId")]
@@ -83,6 +98,8 @@ struct RegisterMessage {
     playing: bool,
     paused: bool,
     compiling: bool,
+    #[serde(default)]
+    capture_views: Vec<UnityCaptureView>,
 }
 
 #[derive(Clone)]
@@ -117,20 +134,47 @@ impl UnityRegistry {
         values
     }
 
-    pub async fn process_id_for(&self, instance_id: &str) -> Result<u32, String> {
+    pub async fn capture_target_for(
+        &self,
+        instance_id: &str,
+        kind: &str,
+    ) -> Result<(u32, Option<crate::stream::CaptureRegion>), String> {
         let instances = self.instances.read().await;
-        if instance_id == "active" {
+        let instance = if instance_id == "active" {
             let mut values: Vec<_> = instances.values().collect();
             values.sort_by(|left, right| left.project_name.cmp(&right.project_name));
-            return values
+            values
                 .first()
-                .map(|instance| instance.process_id)
-                .ok_or_else(|| "No Unity Editor package is connected".to_owned());
-        }
-        instances
-            .get(instance_id)
-            .map(|instance| instance.process_id)
-            .ok_or_else(|| "The selected Unity Editor is no longer connected".to_owned())
+                .copied()
+                .ok_or_else(|| "No Unity Editor package is connected".to_owned())?
+        } else {
+            instances
+                .get(instance_id)
+                .ok_or_else(|| "The selected Unity Editor is no longer connected".to_owned())?
+        };
+        let view = instance
+            .capture_views
+            .iter()
+            .find(|view| view.kind == kind)
+            .or_else(|| instance.capture_views.first())
+            .filter(|view| {
+                view.x.is_finite()
+                    && view.y.is_finite()
+                    && view.width.is_finite()
+                    && view.height.is_finite()
+                    && view.pixels_per_point.is_finite()
+                    && view.width > 1.0
+                    && view.height > 1.0
+                    && view.pixels_per_point > 0.0
+            })
+            .map(|view| crate::stream::CaptureRegion {
+                x: view.x,
+                y: view.y,
+                width: view.width,
+                height: view.height,
+                scale: view.pixels_per_point,
+            });
+        Ok((instance.process_id, view))
     }
 
     pub fn subscribe_results(&self) -> broadcast::Receiver<UnityResult> {
@@ -200,6 +244,7 @@ impl UnityRegistry {
                         playing: instance.playing,
                         paused: instance.paused,
                         compiling: instance.compiling,
+                        capture_views: instance.capture_views,
                         last_seen_at: Utc::now().to_rfc3339(),
                     },
                 );
@@ -215,6 +260,7 @@ impl UnityRegistry {
                 playing,
                 paused,
                 compiling,
+                capture_views,
             } => {
                 let mut instances = self.instances.write().await;
                 let instance = instances.get_mut(&instance_id).ok_or_else(|| {
@@ -224,6 +270,7 @@ impl UnityRegistry {
                 instance.playing = playing;
                 instance.paused = paused;
                 instance.compiling = compiling;
+                instance.capture_views = capture_views;
                 instance.last_seen_at = Utc::now().to_rfc3339();
                 Ok(instance_id)
             }
@@ -264,9 +311,17 @@ pub async fn run_pipe_server(registry: UnityRegistry) -> Result<(), String> {
             .access_inbound(true)
             .access_outbound(true)
             .reject_remote_clients(true);
-        let server = options
-            .create(PIPE_NAME)
-            .map_err(|error| format!("Could not create Unity named pipe: {error}"))?;
+        let server = match options.create(PIPE_NAME) {
+            Ok(server) => server,
+            Err(error) if is_retryable_pipe_create_error(&error) => {
+                tracing::warn!(%error, "Unity named pipe is busy; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(error) => {
+                return Err(format!("Could not create Unity named pipe: {error}"));
+            }
+        };
         first = false;
         server
             .connect()
@@ -277,6 +332,13 @@ pub async fn run_pipe_server(registry: UnityRegistry) -> Result<(), String> {
             let _ = handle_client(server, client_registry).await;
         });
     }
+}
+
+fn is_retryable_pipe_create_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::AlreadyExists
+    ) || matches!(error.raw_os_error(), Some(5 | 231))
 }
 
 async fn handle_client(mut pipe: NamedPipeServer, registry: UnityRegistry) -> Result<(), String> {
@@ -334,4 +396,23 @@ async fn write_json(pipe: &mut NamedPipeServer, value: &serde_json::Value) -> Re
         .await
         .map_err(|error| format!("Could not write Unity response: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable_pipe_create_error;
+    use std::io;
+
+    #[test]
+    fn retries_windows_pipe_ownership_errors() {
+        assert!(is_retryable_pipe_create_error(
+            &io::Error::from_raw_os_error(5)
+        ));
+        assert!(is_retryable_pipe_create_error(
+            &io::Error::from_raw_os_error(231)
+        ));
+        assert!(!is_retryable_pipe_create_error(
+            &io::Error::from_raw_os_error(2)
+        ));
+    }
 }

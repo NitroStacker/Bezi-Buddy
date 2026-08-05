@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Bezi Buddy Setup</AssemblyName>
+    <RootNamespace>BeziRemoteSetup</RootNamespace>
+    <ApplicationIcon>..\windows-launcher\assets\bezi-buddy.ico</ApplicationIcon>
+    <Description>Installs Bezi Buddy, its Windows prerequisites, and the Unity bridge.</Description>
+    <Product>Bezi Buddy Setup</Product>
+    <Company>Bezi Remote</Company>
+    <Version>0.2.0</Version>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('payload\bezi-buddy-payload.zip')">
+    <EmbeddedResource Include="payload\bezi-buddy-payload.zip" LogicalName="BeziBuddy.Payload.zip" />
+  </ItemGroup>
+</Project>

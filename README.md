@@ -1,9 +1,9 @@
 # Bezi Remote
 
-Bezi Remote is an iOS-first companion for controlling Bezi and the active Unity
-Editor on a paired Windows PC. The first milestone runs in Expo Go for a
-single-owner proof; the same application architecture then moves to an Expo
-development build, TestFlight, and the App Store.
+Bezi Remote is an Android and iOS companion for controlling Bezi and the active
+Unity Editor on a paired Windows PC. The current tester build runs in Expo Go;
+the same architecture also supports internal Android APK builds, Expo
+development builds, TestFlight, and the app stores.
 
 ## Product shape
 
@@ -37,7 +37,7 @@ implementation detail of Bezi mode and is never presented as a user feature.
 - GStreamer 1.x MSVC x64 runtime and development packages
 - Unity 6 for the Editor package
 - `cloudflared` for the zero-login Expo Go Quick Tunnel
-- An Apple Developer account only after the Expo Go proof
+- Expo Go on a recent Android phone or iPhone
 
 ## Quick start
 
@@ -45,6 +45,35 @@ implementation detail of Bezi mode and is never presented as a user feature.
 pnpm install
 pnpm proof:expo-go
 ```
+
+## One-file Windows setup
+
+Build the self-contained setup wizard and give the resulting EXE to the tester:
+
+```powershell
+pnpm build:windows-setup
+```
+
+The distributable is written to `dist\bezi-buddy-setup\Bezi Buddy Setup.exe`.
+It installs missing Windows prerequisites, embeds and installs the Bezi Buddy
+runtime without Git or Rust on the tester's PC, lets them choose a Unity project,
+installs or updates the Editor-only bridge, and creates a one-click launcher for
+the companion, relay, mobile bundle, Bezi, and Unity connection.
+
+On Android, install Expo Go from Google Play and open the `exp://` launch link
+shown by Bezi Buddy. An explicitly installable Android APK can also be requested
+through the checked-in EAS preview profile with `pnpm build:android:apk`.
+
+To enable hierarchy, asset, inspector, and `@`-mention context for a Unity
+project, install the Editor-only bridge once for that project:
+
+```powershell
+.\scripts\Install-UnityPackage.ps1 -UnityProject 'R:\My Unity Project'
+```
+
+The installer previews the target, creates a manifest backup, and adds the
+embedded `app.beziremote.unity` package. It does not edit scenes or gameplay
+assets.
 
 The proof launcher prints one `exp://...trycloudflare.com` address and starts
 the local relay, Metro, Quick Tunnel, and native companion. It does not require
@@ -57,7 +86,7 @@ For a one-click Windows launcher, build it once and then double-click the EXE:
 pnpm build:windows-launcher
 ```
 
-The self-contained launcher is written to
+The self-contained developer launcher is written to
 `dist\bezi-buddy\Bezi Buddy.exe`. It starts the built native
 companion and the complete Expo Go relay, prints the temporary `exp://` URL,
 copies it to the Windows clipboard, and keeps the session open until Ctrl+C.
@@ -66,11 +95,10 @@ stage while the local relay, Cloudflare hostname, Expo Go, and companion load.
 The companion starts hidden in the Windows notification area when launched by
 Bezi Buddy; use its tray menu if you need to open the companion window.
 
-On its first email-enabled launch, Bezi Buddy opens Google's App Password setup
-and prompts locally for a dedicated Gmail App Password. After a successful test
-message, the credential is encrypted for the current Windows user under Local
-AppData. Every future proof session emails its clickable Expo Go URL to the
-configured inbox after the public relay becomes ready.
+Email delivery is optional. Run `Bezi Buddy.exe --configure-email` to configure
+a dedicated Gmail App Password. The credential is encrypted for the current
+Windows user under Local AppData, and future sessions email the Expo Go URL to
+the configured inbox.
 
 The architecture and current implementation status are documented in
 [`docs/architecture.md`](docs/architecture.md) and

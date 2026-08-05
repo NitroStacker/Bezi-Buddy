@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Bezi.Remote.Editor.Protocol;
 using UnityEditor;
@@ -44,6 +45,7 @@ namespace Bezi.Remote.Editor.Commands
                     "selection.set" => ExecuteSelect(command),
                     "inspector.snapshot" => ExecuteInspect(command),
                     "property.apply" => ExecuteApply(command),
+                    "capture.view.activate" => ExecuteActivateCaptureView(command),
                     "play.control" => ExecutePlay(command),
                     _ => Failure(
                         command.requestId,
@@ -154,6 +156,29 @@ namespace Bezi.Remote.Editor.Commands
                 playing = EditorApplication.isPlaying,
                 paused = EditorApplication.isPaused
             }));
+        }
+
+        private ResultEnvelope ExecuteActivateCaptureView(CommandEnvelope command)
+        {
+            var request = Parse<CaptureViewRequest>(command.bodyJson);
+            var expectedType = request.kind == "game"
+                ? "UnityEditor.GameView"
+                : request.kind == "scene" ? typeof(SceneView).FullName : null;
+            if (expectedType == null)
+            {
+                throw new CommandException("invalid_view", "Capture view must be 'game' or 'scene'.");
+            }
+            var window = Resources.FindObjectsOfTypeAll<EditorWindow>()
+                .FirstOrDefault(candidate => candidate.GetType().FullName == expectedType);
+            if (window == null)
+            {
+                throw new CommandException(
+                    "view_unavailable",
+                    $"The Unity {request.kind} view is not open.");
+            }
+            window.Focus();
+            window.Repaint();
+            return Success(command.requestId, JsonUtility.ToJson(request));
         }
 
         private void Remember(string key, ResultEnvelope result)
@@ -301,21 +326,25 @@ namespace Bezi.Remote.Editor.Commands
     {
         internal static AssetSnapshot Capture()
         {
-            var assets = AssetDatabase.FindAssets("t:ScriptableObject", new[] { "Assets" })
+            var assets = AssetDatabase.FindAssets(string.Empty, new[] { "Assets" })
                 .Select(AssetDatabase.GUIDToAssetPath)
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Where(path => !AssetDatabase.IsValidFolder(path))
                 .Distinct()
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .Take(4000)
                 .Select(path => new
                 {
                     Path = path,
                     Asset = AssetDatabase.LoadMainAssetAtPath(path)
                 })
-                .Where(entry => entry.Asset is ScriptableObject)
-                .OrderBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
-                .Take(1000)
+                .Where(entry => entry.Asset != null)
                 .Select(entry => new AssetNode
                 {
                     id = TargetResolver.Id(entry.Asset),
-                    name = entry.Asset.name,
+                    name = string.IsNullOrWhiteSpace(entry.Asset.name)
+                        ? Path.GetFileNameWithoutExtension(entry.Path)
+                        : entry.Asset.name,
                     typeName = entry.Asset.GetType().FullName,
                     path = entry.Path
                 })
@@ -466,7 +495,10 @@ namespace Bezi.Remote.Editor.Commands
                 value = ReadValue(property),
                 enumOptions = property.propertyType == SerializedPropertyType.Enum
                     ? property.enumDisplayNames
-                    : Array.Empty<string>()
+                    : Array.Empty<string>(),
+                referenceType = property.propertyType == SerializedPropertyType.ObjectReference
+                    ? property.type
+                    : null
             };
         }
 
@@ -475,7 +507,7 @@ namespace Bezi.Remote.Editor.Commands
             return property.propertyPath == "m_Script" ||
                    property.propertyType == SerializedPropertyType.Generic ||
                    property.propertyType == SerializedPropertyType.ManagedReference ||
-                   property.isArray;
+                   (property.isArray && property.propertyType != SerializedPropertyType.String);
         }
 
         private static string Kind(SerializedProperty property)

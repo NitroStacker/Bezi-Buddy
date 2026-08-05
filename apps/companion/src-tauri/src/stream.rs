@@ -32,6 +32,60 @@ pub enum StreamPreset {
     DataSaver,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+}
+
+#[cfg(feature = "native-streaming")]
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureWindow {
+    pub handle: u64,
+    pub client_x: i32,
+    pub client_y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[cfg(feature = "native-streaming")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureCrop {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[cfg(feature = "native-streaming")]
+impl CaptureWindow {
+    pub fn crop(self, region: Option<CaptureRegion>) -> Result<Option<CaptureCrop>, String> {
+        let Some(region) = region else {
+            return Ok(None);
+        };
+        let requested_left = (region.x * region.scale).round() as i32 - self.client_x;
+        let requested_top = (region.y * region.scale).round() as i32 - self.client_y;
+        let requested_right = requested_left + (region.width * region.scale).round() as i32;
+        let requested_bottom = requested_top + (region.height * region.scale).round() as i32;
+        let left = requested_left.clamp(0, self.width.saturating_sub(2));
+        let top = requested_top.clamp(0, self.height.saturating_sub(2));
+        let end_x = requested_right.clamp(left + 2, self.width);
+        let end_y = requested_bottom.clamp(top + 2, self.height);
+        if end_x <= left || end_y <= top {
+            return Err("The selected Unity view is outside the Editor capture window".to_owned());
+        }
+        Ok(Some(CaptureCrop {
+            left,
+            top,
+            right: self.width - end_x,
+            bottom: self.height - end_y,
+        }))
+    }
+}
+
 #[cfg(feature = "native-streaming")]
 pub struct StreamProfile {
     pub width: u32,
@@ -163,6 +217,7 @@ impl MediaManager {
         device_id: &str,
         request_id: &str,
         process_id: u32,
+        region: Option<CaptureRegion>,
         preset: StreamPreset,
     ) -> Result<(), String> {
         let status = probe();
@@ -178,12 +233,12 @@ impl MediaManager {
                         .clone()
                         .unwrap_or_else(|| "Native media is unavailable".to_owned()))
                 },
-                |native| native.start(device_id, request_id, process_id, preset, &status),
+                |native| native.start(device_id, request_id, process_id, region, preset, &status),
             );
         }
         #[cfg(not(feature = "native-streaming"))]
         {
-            let _ = (device_id, request_id, process_id, preset);
+            let _ = (device_id, request_id, process_id, region, preset);
             Err(self
                 .init_error
                 .clone()
@@ -311,13 +366,14 @@ pub fn probe() -> StreamStatus {
 }
 
 #[cfg(all(windows, feature = "native-streaming"))]
-pub fn find_target_window(process_id: u32) -> Result<u64, String> {
+pub fn find_target_window(process_id: u32) -> Result<CaptureWindow, String> {
     use windows::core::BOOL;
     use windows::Win32::{
-        Foundation::{HWND, LPARAM, RECT},
+        Foundation::{HWND, LPARAM, POINT, RECT},
+        Graphics::Gdi::ClientToScreen,
         UI::WindowsAndMessaging::{
-            EnumWindows, GetWindow, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId,
-            IsWindowVisible, GW_OWNER,
+            EnumWindows, GetClientRect, GetWindow, GetWindowRect, GetWindowTextLengthW,
+            GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
         },
     };
 
@@ -364,14 +420,29 @@ pub fn find_target_window(process_id: u32) -> Result<u64, String> {
         )
     }
     .map_err(|error| format!("Could not enumerate Windows application windows: {error}"))?;
-    search
+    let handle = search
         .best
         .map(|(window, _)| window)
-        .ok_or_else(|| "The selected application has no visible capture window".to_owned())
+        .ok_or_else(|| "The selected application has no visible capture window".to_owned())?;
+    let hwnd = HWND(handle as usize as *mut std::ffi::c_void);
+    let mut client = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut client) }
+        .map_err(|error| format!("Could not read the capture window client bounds: {error}"))?;
+    let mut origin = POINT::default();
+    if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+        return Err("Could not resolve the capture window screen position".to_owned());
+    }
+    Ok(CaptureWindow {
+        handle,
+        client_x: origin.x,
+        client_y: origin.y,
+        width: client.right - client.left,
+        height: client.bottom - client.top,
+    })
 }
 
 #[cfg(all(not(windows), feature = "native-streaming"))]
-pub fn find_target_window(_process_id: u32) -> Result<u64, String> {
+pub fn find_target_window(_process_id: u32) -> Result<CaptureWindow, String> {
     Err("Window capture is available only on Windows".to_owned())
 }
 
@@ -418,6 +489,56 @@ fn find_gstreamer_inspector() -> Option<PathBuf> {
             .status()
             .is_ok_and(|status| status.success())
     })
+}
+
+#[cfg(all(test, feature = "native-streaming"))]
+mod capture_tests {
+    use super::{CaptureCrop, CaptureRegion, CaptureWindow};
+
+    #[test]
+    fn unity_logical_viewport_is_scaled_and_cropped_to_client_pixels() {
+        let window = CaptureWindow {
+            handle: 42,
+            client_x: 0,
+            client_y: 75,
+            width: 3840,
+            height: 2048,
+        };
+        let crop = window
+            .crop(Some(CaptureRegion {
+                x: 416.0,
+                y: 86.0,
+                width: 1408.0,
+                height: 766.0,
+                scale: 1.5,
+            }))
+            .expect("crop should resolve");
+
+        assert_eq!(
+            crop,
+            Some(CaptureCrop {
+                left: 624,
+                top: 54,
+                right: 1104,
+                bottom: 845,
+            })
+        );
+    }
+
+    #[test]
+    fn absent_viewport_keeps_full_window_capture() {
+        let window = CaptureWindow {
+            handle: 42,
+            client_x: 0,
+            client_y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            window.crop(None).expect("full capture should resolve"),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

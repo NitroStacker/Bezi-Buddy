@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 use crate::{
     control::ControlState,
-    stream::{find_target_window, StreamEvent, StreamPreset, StreamStatus},
+    stream::{
+        find_target_window, CaptureRegion, CaptureWindow, StreamEvent, StreamPreset, StreamStatus,
+    },
 };
 
 const STUN_URI: &str = "stun://stun.cloudflare.com:3478";
@@ -131,13 +133,14 @@ impl NativeMediaManager {
         device_id: &str,
         request_id: &str,
         process_id: u32,
+        region: Option<CaptureRegion>,
         preset: StreamPreset,
         status: &StreamStatus,
     ) -> Result<(), String> {
         self.stop(device_id);
 
         let window = find_target_window(process_id)?;
-        let pipeline_description = build_pipeline(window, preset, status)?;
+        let pipeline_description = build_pipeline(window, region, preset, status)?;
         let pipeline = gst::parse::launch(&pipeline_description)
             .map_err(|error| format!("Could not construct the WebRTC pipeline: {error}"))?
             .downcast::<gst::Pipeline>()
@@ -294,7 +297,8 @@ impl NativeMediaManager {
 }
 
 fn build_pipeline(
-    window_handle: u64,
+    window: CaptureWindow,
+    region: Option<CaptureRegion>,
     preset: StreamPreset,
     status: &StreamStatus,
 ) -> Result<String, String> {
@@ -311,6 +315,13 @@ fn build_pipeline(
         .as_deref()
         .ok_or_else(|| "A WASAPI capture plugin is not installed".to_owned())?;
     let profile = preset.profile();
+    let crop = window.crop(region)?.map_or_else(String::new, |crop| {
+        format!(
+            "videocrop left={} top={} right={} bottom={} ! ",
+            crop.left, crop.top, crop.right, crop.bottom
+        )
+    });
+    let window_handle = window.handle;
 
     let (capture_chain, raw_caps) = match capture {
         "d3d12screencapturesrc" => (
@@ -363,7 +374,7 @@ fn build_pipeline(
 
     Ok(format!(
         "webrtcbin name=peer bundle-policy=max-bundle latency=0 stun-server={STUN_URI} \
-         {capture_chain} ! queue max-size-buffers=1 leaky=downstream ! {raw_caps} ! \
+         {capture_chain} ! queue max-size-buffers=1 leaky=downstream ! {crop}{raw_caps} ! \
          {encoder_chain} ! h264parse config-interval=-1 ! \
          rtph264pay pt=96 config-interval=-1 aggregate-mode=zero-latency ! \
          application/x-rtp,media=video,encoding-name=H264,payload=96 ! peer. \
@@ -595,6 +606,7 @@ mod tests {
                 "test-device",
                 &Uuid::new_v4().to_string(),
                 process_id,
+                None,
                 StreamPreset::Balanced,
                 &stream::probe(),
             )
@@ -784,6 +796,7 @@ mod tests {
                 "early-stop-device",
                 &Uuid::new_v4().to_string(),
                 process_id,
+                None,
                 StreamPreset::Balanced,
                 &stream::probe(),
             )
