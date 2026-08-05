@@ -1,5 +1,7 @@
 param(
-    [switch]$SkipCompanionBuild
+    [switch]$SkipCompanionBuild,
+    [ValidateSet("all", "ios", "android")]
+    [string]$Variant = "all"
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,7 +11,6 @@ $launcherOutput = Join-Path $distRoot "bezi-buddy"
 $payloadRoot = Join-Path $distRoot "setup-payload"
 $payloadDirectory = Join-Path $workspace "tools\windows-setup\payload"
 $payloadZip = Join-Path $payloadDirectory "bezi-buddy-payload.zip"
-$setupOutput = Join-Path $distRoot "bezi-buddy-setup"
 $setupProject = Join-Path $workspace "tools\windows-setup\BeziRemoteSetup.csproj"
 $companion = Join-Path $workspace "apps\companion\src-tauri\target\release\bezi-remote-companion.exe"
 
@@ -24,12 +25,8 @@ function Assert-SafeDistPath {
 
 New-Item -ItemType Directory -Force -Path $distRoot, $payloadDirectory | Out-Null
 Assert-SafeDistPath -Path $payloadRoot
-Assert-SafeDistPath -Path $setupOutput
 if (Test-Path -LiteralPath $payloadRoot) {
     Remove-Item -LiteralPath $payloadRoot -Recurse -Force
-}
-if (Test-Path -LiteralPath $setupOutput) {
-    Remove-Item -LiteralPath $setupOutput -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
 
@@ -88,28 +85,64 @@ if (Test-Path -LiteralPath $payloadZip) {
 }
 Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -CompressionLevel Optimal
 
-dotnet publish $setupProject `
-    --configuration Release `
-    --runtime win-x64 `
-    --self-contained true `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:DebugType=None `
-    -p:DebugSymbols=false `
-    --output $setupOutput
-if ($LASTEXITCODE -ne 0) {
-    throw "The Windows setup build failed with exit code $LASTEXITCODE."
+function Publish-SetupVariant {
+    param(
+        [ValidateSet("ios", "android")]
+        [string]$Distribution,
+        [string]$OutputDirectory,
+        [string]$ExecutableName
+    )
+
+    Assert-SafeDistPath -Path $OutputDirectory
+    if (Test-Path -LiteralPath $OutputDirectory) {
+        Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
+    }
+
+    $publishOutput = dotnet publish $setupProject `
+        --configuration Release `
+        --runtime win-x64 `
+        --self-contained true `
+        -p:Distribution=$Distribution `
+        -p:PublishSingleFile=true `
+        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:DebugType=None `
+        -p:DebugSymbols=false `
+        --output $OutputDirectory
+    $publishOutput | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "The $Distribution Windows setup build failed with exit code $LASTEXITCODE."
+    }
+
+    $setup = Join-Path $OutputDirectory $ExecutableName
+    if (-not (Test-Path -LiteralPath $setup)) {
+        throw "Setup build completed without producing '$setup'."
+    }
+    $checkOutput = & $setup --check
+    $checkOutput | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "The embedded $Distribution setup payload check failed."
+    }
+    return $setup
 }
 
-$setup = Join-Path $setupOutput "Bezi Buddy Setup.exe"
-if (-not (Test-Path -LiteralPath $setup)) {
-    throw "Setup build completed without producing '$setup'."
+$builtSetups = [Collections.Generic.List[string]]::new()
+if ($Variant -in @("all", "ios")) {
+    $iosSetup = Publish-SetupVariant `
+        -Distribution "ios" `
+        -OutputDirectory (Join-Path $distRoot "bezi-buddy-ios-setup") `
+        -ExecutableName "Bezi Buddy iOS Expo Go Setup.exe"
+    $builtSetups.Add($iosSetup)
 }
-& $setup --check
-if ($LASTEXITCODE -ne 0) {
-    throw "The embedded setup payload check failed."
+if ($Variant -in @("all", "android")) {
+    $androidSetup = Publish-SetupVariant `
+        -Distribution "android" `
+        -OutputDirectory (Join-Path $distRoot "bezi-buddy-android-setup") `
+        -ExecutableName "Bezi Buddy Android Setup.exe"
+    $builtSetups.Add($androidSetup)
 }
 
 Write-Host ""
-Write-Host "Single-file Windows setup ready:" -ForegroundColor Green
-Write-Host $setup -ForegroundColor Cyan
+Write-Host "Single-file Windows setups ready:" -ForegroundColor Green
+foreach ($setup in $builtSetups) {
+    Write-Host $setup -ForegroundColor Cyan
+}

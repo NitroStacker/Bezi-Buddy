@@ -1,4 +1,4 @@
-# Android and iOS Expo Go proof runbook
+# Android APK and iOS Expo Go proof runbook
 
 ## 1. Local validation
 
@@ -26,19 +26,28 @@ The installer copies the package into `Packages\app.beziremote.unity`, backs up
 
 ## 2. Start the proof
 
+For iOS with Expo Go:
+
 ```powershell
 pnpm proof:expo-go
+```
+
+For a phone with the standalone Android APK:
+
+```powershell
+pnpm proof:android
 ```
 
 The launcher:
 
 - initializes local Wrangler, D1, and Durable Object state;
 - generates a temporary one-owner proof token;
-- starts Metro and the local signaling service;
-- places both behind one local path mux;
+- starts the local signaling service and, for iOS, Metro;
+- places signaling and Metro behind one local path mux for iOS;
 - opens one unauthenticated Cloudflare Quick Tunnel;
-- prints one `exp://...trycloudflare.com` URL for Expo Go;
-- injects the temporary public URL into the development bundle; and
+- prints an `exp://...trycloudflare.com` URL for iOS, or creates an expiring
+  HTTPS-to-app bootstrap link for Android;
+- injects the temporary public URL into the iOS development bundle; and
 - starts the companion with native GStreamer streaming enabled.
 
 You can also build and use the double-clickable Windows launcher:
@@ -48,27 +57,33 @@ pnpm build:windows-launcher
 & ".\dist\bezi-buddy\Bezi Buddy.exe"
 ```
 
-It uses the release companion binary, displays the same Expo Go URL, and copies
-that URL to the Windows clipboard. Keep its console window open while using the
-app; press Ctrl+C there to stop the companion and all relay processes.
+It uses the release companion binary and copies the mobile launch URL to the
+Windows clipboard. Pass `--mobile-mode ios` or `--mobile-mode android`; the
+mode-specific setup wizard creates the correct shortcut automatically. Keep its
+console window open while using the app; press Ctrl+C there to stop the
+companion and all relay processes.
 
-Gmail delivery is optional. Run the launcher with `--configure-email`, create a
-Google App Password named `Bezi Buddy`, then paste it into the hidden terminal
-prompt. Once configured, each new Expo Go URL is emailed automatically after
-Cloudflare and Metro are ready.
+Gmail delivery is optional. Run the launcher with `--configure-email`, choose
+the sender Gmail address and any recipient, create a Google App Password named
+`Bezi Buddy`, then paste it into the hidden terminal prompt. Once configured,
+each mobile launch URL is emailed automatically. Use `--send-to` to override the
+recipient for one session.
 
 No Wrangler login, Cloudflare account, deployed Worker, remote D1 database,
 TURN key, or Cloudflare secret is required for Stage A. Quick Tunnel hostnames
 change every time the launcher starts and are development-only.
 
-The public hostname routes `/v1/*` and `/health` to the local signaling service
-and all other paths to Expo Metro, including WebSocket upgrades.
+For iOS, the public hostname routes `/v1/*` and `/health` to signaling and all
+other paths to Expo Metro. For Android, it routes directly to signaling and the
+credential-free bootstrap landing page; private bootstrap data remains in the
+URL fragment and is handed to the installed app.
 
 ## 3. Pairing
 
-1. Install Expo Go from Google Play or the App Store, then open the printed
-   `exp://...trycloudflare.com` URL.
-2. In the companion, click **Create private pairing code**. The proof URL and
+1. On iOS, install Expo Go from the App Store and open the printed `exp://` URL.
+   On Android, install `Bezi Buddy Android.apk` and open the emailed secure link.
+2. The Android bootstrap is pre-paired. For a manual iOS pairing, click
+   **Create private pairing code** in the companion. The proof URL and
    development token are prefilled by the launcher.
 3. In Expo Go, open Settings from Bezi or Unity mode and scan the QR.
 4. Confirm the paired host appears and connect.
@@ -94,6 +109,6 @@ Stage A intentionally does not claim TURN-only reliability. Add production
 short-lived TURN credentials in the development-build/TestFlight phase if the
 target cellular/NAT combinations require a media relay.
 
-If WebView WebRTC cannot meet the media gates in Expo Go, move to the existing
-EAS development-build profile without changing product screens or protocol
-logic.
+If WebView WebRTC cannot meet the media gates in Expo Go on iOS, move to the
+existing EAS development-build profile without changing product screens or
+protocol logic.

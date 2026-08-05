@@ -5,7 +5,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>Bezi Buddy Setup</AssemblyName>
+    <Distribution Condition="'$(Distribution)' == ''">ios</Distribution>
+    <AssemblyName Condition="'$(Distribution)' == 'ios'">Bezi Buddy iOS Expo Go Setup</AssemblyName>
+    <AssemblyName Condition="'$(Distribution)' == 'android'">Bezi Buddy Android Setup</AssemblyName>
     <RootNamespace>BeziRemoteSetup</RootNamespace>
     <ApplicationIcon>..\windows-launcher\assets\bezi-buddy.ico</ApplicationIcon>
     <Description>Installs Bezi Buddy, its Windows prerequisites, and the Unity bridge.</Description>
@@ -13,6 +15,9 @@
     <Company>Bezi Remote</Company>
     <Version>0.2.0</Version>
     <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Distribution)' == 'android'">
+    <DefineConstants>$(DefineConstants);ANDROID_DISTRIBUTION</DefineConstants>
   </PropertyGroup>
   <ItemGroup Condition="Exists('payload\bezi-buddy-payload.zip')">
     <EmbeddedResource Include="payload\bezi-buddy-payload.zip" LogicalName="BeziBuddy.Payload.zip" />

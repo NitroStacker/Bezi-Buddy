@@ -1,9 +1,8 @@
 # Bezi Remote
 
 Bezi Remote is an Android and iOS companion for controlling Bezi and the active
-Unity Editor on a paired Windows PC. The current tester build runs in Expo Go;
-the same architecture also supports internal Android APK builds, Expo
-development builds, TestFlight, and the app stores.
+Unity Editor on a paired Windows PC. iOS testers use Expo Go; Android testers
+install a standalone APK and do not need Expo Go.
 
 ## Product shape
 
@@ -36,8 +35,8 @@ implementation detail of Bezi mode and is never presented as a user feature.
 - Rust stable and the Windows WebView2 toolchain for the companion
 - GStreamer 1.x MSVC x64 runtime and development packages
 - Unity 6 for the Editor package
-- `cloudflared` for the zero-login Expo Go Quick Tunnel
-- Expo Go on a recent Android phone or iPhone
+- `cloudflared` for the zero-login secure Quick Tunnel
+- Expo Go on a recent iPhone or iPad for the iOS distribution
 
 ## Quick start
 
@@ -46,7 +45,7 @@ pnpm install
 pnpm proof:expo-go
 ```
 
-## One-file Windows setup
+## Two tester distributions
 
 Build the self-contained setup wizard and give the resulting EXE to the tester:
 
@@ -54,15 +53,26 @@ Build the self-contained setup wizard and give the resulting EXE to the tester:
 pnpm build:windows-setup
 ```
 
-The distributable is written to `dist\bezi-buddy-setup\Bezi Buddy Setup.exe`.
-It installs missing Windows prerequisites, embeds and installs the Bezi Buddy
-runtime without Git or Rust on the tester's PC, lets them choose a Unity project,
-installs or updates the Editor-only bridge, and creates a one-click launcher for
-the companion, relay, mobile bundle, Bezi, and Unity connection.
+The build produces two CLI-styled, single-file Windows setup wizards:
 
-On Android, install Expo Go from Google Play and open the `exp://` launch link
-shown by Bezi Buddy. An explicitly installable Android APK can also be requested
-through the checked-in EAS preview profile with `pnpm build:android:apk`.
+- `dist\bezi-buddy-ios-setup\Bezi Buddy iOS Expo Go Setup.exe`
+- `dist\bezi-buddy-android-setup\Bezi Buddy Android Setup.exe`
+
+Both install missing Windows prerequisites, embed and install the Bezi Buddy
+runtime without Git or Rust on the tester's PC, let them choose a Unity project,
+install or update the Editor-only bridge, and create a mode-specific one-click
+launcher for the companion, relay, Bezi, and Unity connection.
+
+Build the standalone Android tester APK with:
+
+```powershell
+pnpm build:android:apk
+```
+
+It is downloaded to `dist\bezi-buddy-android\Bezi Buddy Android.apk`. The
+tester can install that file directly after allowing installs from their file
+provider. Launching the Android PC shortcut creates an expiring secure link;
+opening it on the phone hands the private session into the installed app.
 
 To enable hierarchy, asset, inspector, and `@`-mention context for a Unity
 project, install the Editor-only bridge once for that project:
@@ -75,10 +85,11 @@ The installer previews the target, creates a manifest backup, and adds the
 embedded `app.beziremote.unity` package. It does not edit scenes or gameplay
 assets.
 
-The proof launcher prints one `exp://...trycloudflare.com` address and starts
-the local relay, Metro, Quick Tunnel, and native companion. It does not require
-Wrangler login or remote Cloudflare resources. Press Ctrl+C in that terminal to
-stop the complete proof session.
+The iOS proof launcher prints one `exp://...trycloudflare.com` address and starts
+the local relay, Metro, Quick Tunnel, and native companion. `pnpm proof:android`
+starts the standalone Android path without Metro or Expo Go. Neither path
+requires Wrangler login or remote Cloudflare resources. Press Ctrl+C in that
+terminal to stop the complete proof session.
 
 For a one-click Windows launcher, build it once and then double-click the EXE:
 
@@ -95,10 +106,11 @@ stage while the local relay, Cloudflare hostname, Expo Go, and companion load.
 The companion starts hidden in the Windows notification area when launched by
 Bezi Buddy; use its tray menu if you need to open the companion window.
 
-Email delivery is optional. Run `Bezi Buddy.exe --configure-email` to configure
-a dedicated Gmail App Password. The credential is encrypted for the current
-Windows user under Local AppData, and future sessions email the Expo Go URL to
-the configured inbox.
+Email delivery is optional. Run `Bezi Buddy.exe --configure-email` to choose a
+sender Gmail account and any default recipient, then configure a dedicated Gmail
+App Password. The credential is encrypted for the current Windows user under
+Local AppData. Use `--send-to tester@example.com` on any launch to override the
+recipient for just that session.
 
 The architecture and current implementation status are documented in
 [`docs/architecture.md`](docs/architecture.md) and

@@ -1,5 +1,6 @@
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
+import type { AndroidBootstrap } from "./android-bootstrap";
 
 const keys = {
   relayUrl: "bezi-remote.relay-url",
@@ -50,6 +51,17 @@ export async function saveRelayCredentials(
   await Promise.all([
     SecureStore.setItemAsync(keys.relayUrl, normalized),
     SecureStore.setItemAsync(keys.ownerToken, ownerToken),
+  ]);
+}
+
+export async function saveAndroidBootstrap(
+  bootstrap: AndroidBootstrap,
+): Promise<void> {
+  await Promise.all([
+    SecureStore.setItemAsync(keys.relayUrl, bootstrap.relayUrl.replace(/\/+$/, "")),
+    SecureStore.setItemAsync(keys.ownerToken, bootstrap.ownerToken),
+    SecureStore.setItemAsync(keys.deviceId, bootstrap.mobileDeviceId),
+    SecureStore.setItemAsync(`bezi-remote.pair.${bootstrap.hostId}`, bootstrap.pairSecret),
   ]);
 }
 

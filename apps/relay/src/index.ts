@@ -3,6 +3,7 @@ import { authenticate } from "./auth";
 import type { Env } from "./env";
 import { errorResponse, HttpError, json, readJson } from "./http";
 import { HostRoom } from "./room";
+import { mobileBootstrapResponse } from "./mobile-bootstrap";
 import {
   isExpired,
   randomToken,
@@ -67,6 +68,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
     return json({ ok: true, version: 1, environment: env.ENVIRONMENT });
+  }
+  if (request.method === "GET" && url.pathname === "/mobile-bootstrap") {
+    return mobileBootstrapResponse();
   }
 
   const connectMatch = url.pathname.match(routes.connect);

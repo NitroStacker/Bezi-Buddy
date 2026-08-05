@@ -44,7 +44,7 @@ internal sealed class SetupForm : Form
 
     public SetupForm()
     {
-        Text = "Bezi Buddy Setup";
+        Text = Distribution.ProductName;
         ClientSize = new Size(940, 720);
         MinimumSize = new Size(860, 660);
         StartPosition = FormStartPosition.CenterScreen;
@@ -157,7 +157,7 @@ internal sealed class SetupForm : Form
         var content = ContentPanel();
         content.Controls.Add(Title("initialize remote workspace"));
         content.Controls.Add(Copy(
-            "[INFO] One bootstrap configures the Windows companion, secure relay, Android client, and Unity Editor bridge. After setup, one command starts everything."));
+            $"[INFO] One bootstrap configures the Windows companion, secure relay, {Distribution.ClientName}, and Unity Editor bridge. After setup, one command starts everything."));
 
         var cards = new FlowLayoutPanel
         {
@@ -167,7 +167,7 @@ internal sealed class SetupForm : Form
             Margin = new Padding(0, 28, 0, 0),
             BackColor = Color.Transparent
         };
-        cards.Controls.Add(FeatureCard("$ 01", "ANDROID_CLIENT", "Expo Go opens the secure link on Android."));
+        cards.Controls.Add(FeatureCard("$ 01", Distribution.ClientName, Distribution.ClientDescription));
         cards.Controls.Add(FeatureCard("$ 02", "UNITY_BRIDGE", "Installs the Editor bridge. Scenes stay untouched."));
         cards.Controls.Add(FeatureCard("$ 03", "ONE_CLICK_LAUNCH", "Starts Bezi, Unity, relay, and companion."));
         content.Controls.Add(cards);
@@ -195,7 +195,7 @@ internal sealed class SetupForm : Form
         content.Controls.Add(Copy("[READY] Missing prerequisites will be installed, then the runtime, Unity bridge, and one-click launcher will be configured."));
         content.Controls.Add(SummaryRow("INSTALL_PATH", _installPath.Text));
         content.Controls.Add(SummaryRow("UNITY_PROJECT", _unityPath.Text));
-        content.Controls.Add(SummaryRow("ANDROID_TARGET", "EXPO_GO + SECURE_CLOUDFLARE_LINK"));
+        content.Controls.Add(SummaryRow("MOBILE_TARGET", Distribution.TargetSummary));
         content.Controls.Add(SummaryRow("LAUNCH_TARGETS", "BEZI + UNITY + COMPANION + RELAY"));
         _page.Controls.Add(content);
     }
@@ -221,13 +221,18 @@ internal sealed class SetupForm : Form
         badge.Margin = new Padding(0, 0, 0, 18);
         content.Controls.Add(badge);
         content.Controls.Add(Title("bezi buddy is ready"));
-        content.Controls.Add(Copy("[NEXT] On Android, install Expo Go and open the exp:// link printed by the launcher. Keep the terminal open while controlling Bezi or Unity."));
-        var android = CreateButton("OPEN GOOGLE PLAY ↗", secondary: true);
-        android.Width = 244;
-        android.Height = 48;
-        android.Margin = new Padding(0, 28, 0, 0);
-        android.Click += (_, _) => InstallerEngine.OpenAndroidExpoGo();
-        content.Controls.Add(android);
+        content.Controls.Add(Copy(Distribution.IsAndroid
+            ? "[NEXT] Install the Bezi Buddy APK on the Android phone. Launch this shortcut, then open the secure link emailed to the tester. Expo Go is not required."
+            : "[NEXT] Install Expo Go on the iPhone or iPad, launch this shortcut, and open the exp:// link. Keep the terminal open while controlling Bezi or Unity."));
+        if (!Distribution.IsAndroid)
+        {
+            var expoGo = CreateButton("OPEN EXPO GO APP STORE ↗", secondary: true);
+            expoGo.Width = 290;
+            expoGo.Height = 48;
+            expoGo.Margin = new Padding(0, 28, 0, 0);
+            expoGo.Click += (_, _) => InstallerEngine.OpenExpoGo();
+            content.Controls.Add(expoGo);
+        }
         _page.Controls.Add(content);
     }
 

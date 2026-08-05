@@ -4,7 +4,10 @@ param(
     [switch]$UseBuiltCompanion,
     [switch]$CopyExpoUrl,
     [switch]$LauncherMode,
-    [switch]$SkipEmail
+    [switch]$SkipEmail,
+    [ValidateSet("expo-go", "android")]
+    [string]$MobileMode = "expo-go",
+    [string]$RecipientEmail
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,8 +29,12 @@ function Write-LauncherProgress {
     }
 }
 
-function Send-ExpoUrlEmail {
-    param([string]$ExpoUrl)
+function Send-MobileLaunchEmail {
+    param(
+        [string]$LaunchUrl,
+        [string]$Mode,
+        [string]$RecipientOverride
+    )
 
     $configPath = Join-Path $env:LOCALAPPDATA "Bezi Remote\gmail-delivery.json"
     if (-not (Test-Path -LiteralPath $configPath)) {
@@ -39,22 +46,46 @@ function Send-ExpoUrlEmail {
 
     try {
         $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+        $sender = if ($config.senderEmailAddress) {
+            [string]$config.senderEmailAddress
+        } else {
+            [string]$config.emailAddress
+        }
+        $recipient = if (-not [string]::IsNullOrWhiteSpace($RecipientOverride)) {
+            $RecipientOverride.Trim()
+        } elseif ($config.recipientEmailAddress) {
+            [string]$config.recipientEmailAddress
+        } else {
+            [string]$config.emailAddress
+        }
+        if ([string]::IsNullOrWhiteSpace($sender) -or [string]::IsNullOrWhiteSpace($recipient)) {
+            throw "Email sender and recipient are not configured."
+        }
+        [void][Net.Mail.MailAddress]::new($sender)
+        [void][Net.Mail.MailAddress]::new($recipient)
         $securePassword = ConvertTo-SecureString $config.encryptedAppPassword
         $credential = [Management.Automation.PSCredential]::new(
-            $config.emailAddress,
+            $sender,
             $securePassword
         )
-        $encodedUrl = [Net.WebUtility]::HtmlEncode($ExpoUrl)
+        $encodedUrl = [Net.WebUtility]::HtmlEncode($LaunchUrl)
+        $isAndroid = $Mode -eq "android"
+        $action = if ($isAndroid) { "Open Bezi Buddy on Android" } else { "Open this link in Expo Go" }
+        $subject = if ($isAndroid) {
+            "Bezi Buddy Android session is ready"
+        } else {
+            "Bezi Buddy iOS session is ready - open in Expo Go"
+        }
         $body = @"
 <p>Bezi Buddy is ready.</p>
-<p><a href="$encodedUrl">Open this link in Expo Go</a></p>
+<p><a href="$encodedUrl">$action</a></p>
 <p style="font-family: monospace;">$encodedUrl</p>
 <p>Keep the Bezi Buddy window running on your PC while using the app.</p>
 "@
         $message = [Net.Mail.MailMessage]::new(
-            $config.emailAddress,
-            $config.emailAddress,
-            "Bezi Buddy is ready - open in Expo Go",
+            $sender,
+            $recipient,
+            $subject,
             $body
         )
         $smtp = [Net.Mail.SmtpClient]::new("smtp.gmail.com", 587)
@@ -75,7 +106,7 @@ function Send-ExpoUrlEmail {
 
         return [pscustomobject]@{
             Status = "sent"
-            Message = "Expo Go link emailed to $($config.emailAddress)."
+            Message = "Launch link emailed to $recipient."
         }
     }
     catch {
@@ -561,6 +592,7 @@ if (-not $node) {
     throw "Node.js is missing. Run Bezi Buddy Setup again to repair prerequisites."
 }
 $env:PATH = "$(Split-Path $node);$(Split-Path $pnpm);$(Split-Path $cloudflared);$env:PATH"
+$isAndroidMode = $MobileMode -eq "android"
 $proofToken = New-ProofToken
 $proofHostId = Get-ProofIdentifier -Name "proof-host-id" -Prefix "host-proof-"
 $proofMobileDeviceId = Get-ProofIdentifier -Name "proof-mobile-id" -Prefix "mobile-proof-"
@@ -605,7 +637,11 @@ try {
     $pairingBody = @{
         pairingId = $proofPairingId
         hostId = $proofHostId
-        hostName = "$env:COMPUTERNAME (Expo proof)"
+        hostName = if ($isAndroidMode) {
+            "$env:COMPUTERNAME (Android)"
+        } else {
+            "$env:COMPUTERNAME (Expo Go)"
+        }
         codeHash = Get-Sha256Base64Url -Value $proofClaimCode
         expiresAt = $proofExpiresAt
         companionVersion = "0.1.0"
@@ -620,7 +656,7 @@ try {
     $claimBody = @{
         claimCode = $proofClaimCode
         mobileDeviceId = $proofMobileDeviceId
-        deviceName = "Expo Go proof phone"
+        deviceName = if ($isAndroidMode) { "Bezi Buddy Android" } else { "Expo Go proof phone" }
         keyFingerprint = Get-Sha256Base64Url -Value $proofPairSecret
     } | ConvertTo-Json -Compress
     Invoke-RestMethod `
@@ -631,14 +667,20 @@ try {
         -Body $claimBody |
         Out-Null
 
-    $mux = Start-ProofProcess `
-        -Name "proof-mux" `
-        -FilePath $node `
-        -Arguments @(
-            "scripts/proof-mux.mjs", "--listen", "$muxPort",
-            "--metro", "$metroPort", "--relay", "$relayPort"
-        )
-    Wait-LocalEndpoint -Url "http://127.0.0.1:$muxPort/health" -Process $mux
+    if ($isAndroidMode) {
+        $tunnelOriginPort = $relayPort
+    }
+    else {
+        $mux = Start-ProofProcess `
+            -Name "proof-mux" `
+            -FilePath $node `
+            -Arguments @(
+                "scripts/proof-mux.mjs", "--listen", "$muxPort",
+                "--metro", "$metroPort", "--relay", "$relayPort"
+            )
+        Wait-LocalEndpoint -Url "http://127.0.0.1:$muxPort/health" -Process $mux
+        $tunnelOriginPort = $muxPort
+    }
 
     $proofTunnel = $null
     $proofUrl = $null
@@ -650,12 +692,12 @@ try {
         $proofTunnel = Start-ProofProcess `
             -Name "proof-tunnel" `
             -FilePath $cloudflared `
-            -Arguments @("tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:$muxPort")
+            -Arguments @("tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:$tunnelOriginPort")
         try {
             $proofUrl = Wait-TunnelUrl -Name "proof-tunnel" -Process $proofTunnel
             Write-LauncherProgress `
                 -Stage "cloudflare-dns" `
-                -Message "Waiting for Cloudflare to publish the Expo URL"
+                -Message "Waiting for Cloudflare to publish the mobile URL"
             Wait-PublicEndpoint -Url "$proofUrl/health" -Process $proofTunnel
             Write-LauncherProgress -Stage "cloudflare-ready" -Message "Cloudflare relay is connected"
             break
@@ -672,41 +714,60 @@ try {
         }
     }
 
-    $mobileEnvironment = @"
+    if ($isAndroidMode) {
+        $bootstrapData = [ordered]@{
+            v = 1
+            relayUrl = $proofUrl
+            ownerToken = $proofToken
+            hostId = $proofHostId
+            mobileDeviceId = $proofMobileDeviceId
+            pairSecret = $proofPairSecret
+            expiresAt = [DateTime]::UtcNow.AddHours(24).ToString("o")
+        } | ConvertTo-Json -Compress
+        $bootstrapBytes = [Text.Encoding]::UTF8.GetBytes($bootstrapData)
+        $bootstrapPayload = [Convert]::ToBase64String($bootstrapBytes).
+            TrimEnd("=").Replace("+", "-").Replace("/", "_")
+        $launchUrl = "$proofUrl/mobile-bootstrap#payload=$bootstrapPayload"
+        Write-LauncherProgress -Stage "android-ready" -Message "Android secure setup link is ready"
+    }
+    else {
+        $mobileEnvironment = @"
 EXPO_PUBLIC_RELAY_URL=$proofUrl
 EXPO_PUBLIC_DEV_OWNER_TOKEN=$proofToken
 EXPO_PUBLIC_DEV_HOST_ID=$proofHostId
 EXPO_PUBLIC_DEV_MOBILE_DEVICE_ID=$proofMobileDeviceId
 EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
 "@
-    [IO.File]::WriteAllText(
-        (Join-Path $workspace "apps\mobile\.env.local"),
-        $mobileEnvironment,
-        [Text.UTF8Encoding]::new($false)
-    )
-
-    # Metro otherwise appends its local listening port to the public Host header.
-    # Tell Expo that Cloudflare is the public packager proxy so manifests and
-    # bundle/WebSocket URLs point back through the HTTPS Quick Tunnel.
-    $env:EXPO_PACKAGER_PROXY_URL = $proofUrl
-
-    Write-LauncherProgress -Stage "expo" -Message "Starting Expo Go"
-    $metro = Start-ProofProcess `
-        -Name "metro" `
-        -FilePath $pnpm `
-        -Arguments @(
-            "--dir", "apps/mobile", "exec", "expo", "start",
-            "--go", "--offline", "--port", "$metroPort", "--clear"
+        [IO.File]::WriteAllText(
+            (Join-Path $workspace "apps\mobile\.env.local"),
+            $mobileEnvironment,
+            [Text.UTF8Encoding]::new($false)
         )
-    Wait-LocalEndpoint -Url "http://127.0.0.1:$metroPort/status" -Process $metro -Seconds 60
 
-    Wait-PublicEndpoint -Url "$proofUrl/status" -Process $proofTunnel
-    $expoUrl = $proofUrl.Replace("https://", "exp://")
-    Write-LauncherProgress -Stage "expo-ready" -Message "Expo Go is ready"
+        # Metro otherwise appends its local listening port to the public Host header.
+        # Tell Expo that Cloudflare is the public packager proxy so manifests and
+        # bundle/WebSocket URLs point back through the HTTPS Quick Tunnel.
+        $env:EXPO_PACKAGER_PROXY_URL = $proofUrl
+
+        Write-LauncherProgress -Stage "expo" -Message "Starting Expo Go for iOS"
+        $metro = Start-ProofProcess `
+            -Name "metro" `
+            -FilePath $pnpm `
+            -Arguments @(
+                "--dir", "apps/mobile", "exec", "expo", "start",
+                "--go", "--offline", "--port", "$metroPort", "--clear"
+            )
+        Wait-LocalEndpoint -Url "http://127.0.0.1:$metroPort/status" -Process $metro -Seconds 60
+
+        Wait-PublicEndpoint -Url "$proofUrl/status" -Process $proofTunnel
+        $launchUrl = $proofUrl.Replace("https://", "exp://")
+        Write-LauncherProgress -Stage "expo-ready" -Message "Expo Go for iOS is ready"
+    }
 
     $session = [ordered]@{
         startedAt = [DateTime]::UtcNow.ToString("o")
-        expoUrl = $expoUrl
+        mobileMode = $MobileMode
+        launchUrl = $launchUrl
         relayUrl = $proofUrl
         ownerToken = $proofToken
     }
@@ -716,8 +777,8 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
         [Text.UTF8Encoding]::new($false)
     )
     [IO.File]::WriteAllText(
-        (Join-Path $runtime "expo-go-url.txt"),
-        $expoUrl,
+        (Join-Path $runtime "mobile-launch-url.txt"),
+        $launchUrl,
         [Text.UTF8Encoding]::new($false)
     )
 
@@ -774,8 +835,11 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
         }
     }
     else {
-        Write-LauncherProgress -Stage "email" -Message "Emailing the Expo Go link"
-        $emailDelivery = Send-ExpoUrlEmail -ExpoUrl $expoUrl
+        Write-LauncherProgress -Stage "email" -Message "Emailing the mobile launch link"
+        $emailDelivery = Send-MobileLaunchEmail `
+            -LaunchUrl $launchUrl `
+            -Mode $MobileMode `
+            -RecipientOverride $RecipientEmail
     }
     if ($LauncherMode) {
         Write-Output "BEZI_EMAIL|$($emailDelivery.Status)|$($emailDelivery.Message)"
@@ -787,31 +851,36 @@ EXPO_PUBLIC_DEV_PAIR_SECRET=$proofPairSecret
         Write-Warning $emailDelivery.Message
     }
 
-    $copiedExpoUrl = $false
+    $copiedLaunchUrl = $false
     if ($CopyExpoUrl) {
         try {
-            Set-Clipboard -Value $expoUrl
-            $copiedExpoUrl = $true
+            Set-Clipboard -Value $launchUrl
+            $copiedLaunchUrl = $true
         }
         catch {
-            Write-Warning "The Expo Go URL could not be copied to the clipboard: $($_.Exception.Message)"
+            Write-Warning "The mobile launch URL could not be copied to the clipboard: $($_.Exception.Message)"
         }
     }
 
     Write-Host ""
     if ($LauncherMode) {
-        Write-Output "BEZI_READY|$expoUrl|$copiedExpoUrl"
+        Write-Output "BEZI_READY|$launchUrl|$copiedLaunchUrl|$MobileMode"
     }
     else {
-        Write-Host "Bezi Remote proof is ready." -ForegroundColor Green
-        Write-Host "Open this in Expo Go:" -ForegroundColor Gray
-        Write-Host $expoUrl -ForegroundColor Cyan
-        if ($copiedExpoUrl) {
+        Write-Host "Bezi Buddy is ready." -ForegroundColor Green
+        if ($isAndroidMode) {
+            Write-Host "Open this secure link on the Android phone after installing Bezi Buddy:" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "Open this in Expo Go on iPhone:" -ForegroundColor Gray
+        }
+        Write-Host $launchUrl -ForegroundColor Cyan
+        if ($copiedLaunchUrl) {
             Write-Host "Copied to the Windows clipboard." -ForegroundColor Green
         }
         Write-Host ""
-        Write-Host "The local relay URL and one-owner token were injected automatically." -ForegroundColor Gray
-        Write-Host "Press Ctrl+C to stop the proof session." -ForegroundColor DarkGray
+        Write-Host "The private relay and pairing credentials were prepared automatically." -ForegroundColor Gray
+        Write-Host "Press Ctrl+C to stop the session." -ForegroundColor DarkGray
     }
 
     if ($ExitAfterReady) {

@@ -15,7 +15,8 @@ internal static class Program
     private static readonly object StateLock = new();
     private static readonly Queue<string> Diagnostics = new();
     private static string _loadingMessage = "Waking up Bezi Buddy";
-    private static string? _expoUrl;
+    private static string? _launchUrl;
+    private static string _mobileMode = "expo-go";
     private static bool _urlCopied;
     private static string _emailStatus = "not-configured";
     private static string _emailMessage = "Email delivery is not configured.";
@@ -80,7 +81,10 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
-        Console.Title = "Bezi Buddy";
+        _mobileMode = NormalizeMobileMode(ReadArgument(args, "--mobile-mode"));
+        Console.Title = _mobileMode == "android"
+            ? "Bezi Buddy — Android"
+            : "Bezi Buddy — iOS + Expo Go";
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
         var workspace = FindWorkspace(args);
@@ -115,7 +119,10 @@ internal static class Program
             argument.Equals("--configure-email", StringComparison.OrdinalIgnoreCase));
         if (forceEmailSetup)
         {
-            var setupExitCode = await RunEmailSetupAsync(workspace);
+            var setupExitCode = await RunEmailSetupAsync(
+                workspace,
+                ReadArgument(args, "--email-from"),
+                ReadArgument(args, "--email-to"));
             return setupExitCode;
         }
 
@@ -148,6 +155,14 @@ internal static class Program
         powershell.StartInfo.ArgumentList.Add("-UseBuiltCompanion");
         powershell.StartInfo.ArgumentList.Add("-CopyExpoUrl");
         powershell.StartInfo.ArgumentList.Add("-LauncherMode");
+        powershell.StartInfo.ArgumentList.Add("-MobileMode");
+        powershell.StartInfo.ArgumentList.Add(_mobileMode);
+        var recipientEmail = ReadArgument(args, "--send-to");
+        if (!string.IsNullOrWhiteSpace(recipientEmail))
+        {
+            powershell.StartInfo.ArgumentList.Add("-RecipientEmail");
+            powershell.StartInfo.ArgumentList.Add(recipientEmail);
+        }
         if (args.Any(argument =>
             argument.Equals("--skip-email", StringComparison.OrdinalIgnoreCase)))
         {
@@ -475,15 +490,19 @@ internal static class Program
 
             if (line.StartsWith("BEZI_READY|", StringComparison.Ordinal))
             {
-                var parts = line.Split('|', 3);
+                var parts = line.Split('|', 4);
                 if (parts.Length >= 2)
                 {
                     lock (StateLock)
                     {
-                        _expoUrl = parts[1];
-                        _urlCopied = parts.Length == 3 &&
+                        _launchUrl = parts[1];
+                        _urlCopied = parts.Length >= 3 &&
                             bool.TryParse(parts[2], out var copied) &&
                             copied;
+                        if (parts.Length >= 4)
+                        {
+                            _mobileMode = NormalizeMobileMode(parts[3]);
+                        }
                     }
                     ready.TrySetResult();
                 }
@@ -518,9 +537,11 @@ internal static class Program
         Console.ResetColor();
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("       Open this URL in Expo Go on Android or iPhone:");
+        Console.WriteLine(_mobileMode == "android"
+            ? "       Open the emailed secure link on the Android phone:"
+            : "       Open this URL in Expo Go on iPhone:");
         Console.ForegroundColor = ConsoleColor.White;
-        Console.WriteLine($"       {_expoUrl}");
+        Console.WriteLine($"       {_launchUrl}");
         Console.ResetColor();
         if (_urlCopied)
         {
@@ -625,7 +646,10 @@ internal static class Program
         return File.Exists(configPath);
     }
 
-    private static async Task<int> RunEmailSetupAsync(string workspace)
+    private static async Task<int> RunEmailSetupAsync(
+        string workspace,
+        string? senderEmail,
+        string? recipientEmail)
     {
         var setupScript = Path.Combine(workspace, "scripts", "Configure-GmailDelivery.ps1");
         if (!File.Exists(setupScript))
@@ -651,6 +675,16 @@ internal static class Program
         setup.StartInfo.ArgumentList.Add("Bypass");
         setup.StartInfo.ArgumentList.Add("-File");
         setup.StartInfo.ArgumentList.Add(setupScript);
+        if (!string.IsNullOrWhiteSpace(senderEmail))
+        {
+            setup.StartInfo.ArgumentList.Add("-SenderEmail");
+            setup.StartInfo.ArgumentList.Add(senderEmail);
+        }
+        if (!string.IsNullOrWhiteSpace(recipientEmail))
+        {
+            setup.StartInfo.ArgumentList.Add("-RecipientEmail");
+            setup.StartInfo.ArgumentList.Add(recipientEmail);
+        }
 
         if (!setup.Start())
         {
@@ -700,16 +734,19 @@ internal static class Program
     }
 
     private static string? ReadWorkspaceArgument(string[] args)
+        => ReadArgument(args, "--workspace");
+
+    private static string? ReadArgument(string[] args, string name)
     {
         for (var index = 0; index < args.Length; index++)
         {
-            if (args[index].Equals("--workspace", StringComparison.OrdinalIgnoreCase) &&
+            if (args[index].Equals(name, StringComparison.OrdinalIgnoreCase) &&
                 index + 1 < args.Length)
             {
                 return args[index + 1];
             }
 
-            const string prefix = "--workspace=";
+            var prefix = $"{name}=";
             if (args[index].StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             {
                 return args[index][prefix.Length..];
@@ -718,6 +755,15 @@ internal static class Program
 
         return null;
     }
+
+    private static string NormalizeMobileMode(string? mode) =>
+        mode?.Trim().ToLowerInvariant() switch
+        {
+            "android" => "android",
+            "ios" or "expo-go" or null or "" => "expo-go",
+            _ => throw new ArgumentException(
+                "--mobile-mode must be 'ios', 'expo-go', or 'android'.")
+        };
 
     private static bool IsWorkspace(string path) =>
         File.Exists(Path.Combine(path, ProofScript)) &&

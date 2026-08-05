@@ -35,7 +35,7 @@ internal sealed class InstallerEngine
     public static string DefaultInstallDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Programs",
-        "Bezi Buddy");
+        Distribution.InstallFolder);
 
     public static void ValidateEmbeddedPayload()
     {
@@ -125,7 +125,7 @@ internal sealed class InstallerEngine
         _progress(35, "Installing Bezi Buddy application files");
         ExtractPayload(installDirectory);
 
-        _progress(52, "Preparing the local relay and Android app runtime");
+        _progress(52, "Preparing the local relay and mobile runtime");
         await InstallWorkspaceDependenciesAsync(installDirectory);
 
         _progress(77, "Installing the Unity Editor bridge");
@@ -134,7 +134,7 @@ internal sealed class InstallerEngine
         _progress(91, "Creating one-click launcher shortcuts");
         CreateShortcuts(installDirectory, request.CreateDesktopShortcut);
 
-        _progress(100, "Bezi Buddy is ready for Android, Bezi, and Unity");
+        _progress(100, $"{Distribution.ShortcutName} is ready for Bezi and Unity");
     }
 
     public static void Launch(string installDirectory)
@@ -148,15 +148,16 @@ internal sealed class InstallerEngine
         {
             FileName = launcher,
             WorkingDirectory = installDirectory,
-            UseShellExecute = true
+            UseShellExecute = true,
+            ArgumentList = { "--mobile-mode", Distribution.LauncherMode }
         });
     }
 
-    public static void OpenAndroidExpoGo()
+    public static void OpenExpoGo()
     {
         Process.Start(new ProcessStartInfo
         {
-            FileName = "https://play.google.com/store/apps/details?id=host.exp.exponent",
+            FileName = "https://apps.apple.com/app/expo-go/id982107779",
             UseShellExecute = true
         });
     }
@@ -275,14 +276,19 @@ internal sealed class InstallerEngine
         var launcher = Path.Combine(installDirectory, "Bezi Buddy.exe");
         var startMenuDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
-            "Programs", "Bezi Buddy");
+            "Programs", Distribution.ShortcutName);
         Directory.CreateDirectory(startMenuDirectory);
-        CreateShortcut(Path.Combine(startMenuDirectory, "Bezi Buddy.lnk"), launcher, installDirectory);
+        CreateShortcut(
+            Path.Combine(startMenuDirectory, $"{Distribution.ShortcutName}.lnk"),
+            launcher,
+            installDirectory);
 
         if (desktop)
         {
             CreateShortcut(
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Bezi Buddy.lnk"),
+                Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    $"{Distribution.ShortcutName}.lnk"),
                 launcher,
                 installDirectory);
         }
@@ -306,7 +312,8 @@ internal sealed class InstallerEngine
             var shortcutType = shortcut!.GetType();
             shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, [target]);
             shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, [workingDirectory]);
-            shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, ["Launch Bezi Buddy for Android, Bezi, and Unity"]);
+            shortcutType.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, [$"--mobile-mode {Distribution.LauncherMode}"]);
+            shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, [$"Launch {Distribution.ShortcutName} for Bezi and Unity"]);
             shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, [$"{target},0"]);
             shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
         }

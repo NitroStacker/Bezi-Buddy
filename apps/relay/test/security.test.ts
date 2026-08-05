@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isExpired, sha256Base64Url, timingSafeEqual } from "../src/security";
+import { mobileBootstrapResponse } from "../src/mobile-bootstrap";
 
 describe("relay security helpers", () => {
   it("hashes claim codes deterministically without preserving plaintext", async () => {
@@ -20,3 +21,14 @@ describe("relay security helpers", () => {
   });
 });
 
+describe("Android bootstrap landing page", () => {
+  it("keeps credentials in the browser fragment and disables caching", async () => {
+    const response = mobileBootstrapResponse();
+    const body = await response.text();
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(body).toContain("location.hash");
+    expect(body).toContain("beziremote://bootstrap");
+    expect(body).not.toContain("ownerToken");
+  });
+});

@@ -27,6 +27,10 @@ export default function RootLayout() {
                 animation: "slide_from_bottom",
               }}
             />
+            <Stack.Screen
+              name="bootstrap"
+              options={{ presentation: "fullScreenModal", animation: "fade" }}
+            />
           </Stack>
         </SessionProvider>
       </QueryClientProvider>
