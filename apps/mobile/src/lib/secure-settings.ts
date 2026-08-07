@@ -1,6 +1,7 @@
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import type { AndroidBootstrap } from "./android-bootstrap";
+import { developmentOverride } from "./development-overrides";
 
 const keys = {
   relayUrl: "bezi-remote.relay-url",
@@ -20,19 +21,23 @@ export async function loadSecureSettings(): Promise<SecureSettings> {
     SecureStore.getItemAsync(keys.ownerToken),
     SecureStore.getItemAsync(keys.deviceId),
   ]);
+  const developmentDeviceId = developmentOverride(
+    process.env.EXPO_PUBLIC_DEV_MOBILE_DEVICE_ID,
+  );
   const deviceId =
-    process.env.EXPO_PUBLIC_DEV_MOBILE_DEVICE_ID ??
-    storedDeviceId ??
-    `mobile-${Crypto.randomUUID()}`;
-  if (!storedDeviceId && !process.env.EXPO_PUBLIC_DEV_MOBILE_DEVICE_ID) {
+    developmentDeviceId ?? storedDeviceId ?? `mobile-${Crypto.randomUUID()}`;
+  if (!storedDeviceId && !developmentDeviceId) {
     await SecureStore.setItemAsync(keys.deviceId, deviceId);
   }
   return {
     relayUrl:
-      process.env.EXPO_PUBLIC_RELAY_URL ??
+      developmentOverride(process.env.EXPO_PUBLIC_RELAY_URL) ??
       storedRelayUrl ??
       "http://127.0.0.1:8787",
-    ownerToken: process.env.EXPO_PUBLIC_DEV_OWNER_TOKEN ?? ownerToken ?? "",
+    ownerToken:
+      developmentOverride(process.env.EXPO_PUBLIC_DEV_OWNER_TOKEN) ??
+      ownerToken ??
+      "",
     deviceId,
   };
 }
@@ -73,11 +78,17 @@ export async function savePairSecret(
 }
 
 export async function getPairSecret(hostId: string): Promise<string | null> {
+  const developmentHostId = developmentOverride(
+    process.env.EXPO_PUBLIC_DEV_HOST_ID,
+  );
+  const developmentPairSecret = developmentOverride(
+    process.env.EXPO_PUBLIC_DEV_PAIR_SECRET,
+  );
   if (
-    process.env.EXPO_PUBLIC_DEV_HOST_ID === hostId &&
-    process.env.EXPO_PUBLIC_DEV_PAIR_SECRET
+    developmentHostId === hostId &&
+    developmentPairSecret
   ) {
-    return process.env.EXPO_PUBLIC_DEV_PAIR_SECRET;
+    return developmentPairSecret;
   }
   return SecureStore.getItemAsync(`bezi-remote.pair.${hostId}`);
 }

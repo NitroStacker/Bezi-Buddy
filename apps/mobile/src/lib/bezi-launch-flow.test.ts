@@ -3,6 +3,7 @@ import {
   initialBeziLaunchState,
   isBeziLaunchPending,
   reduceBeziLaunchState,
+  shouldRequestCompletePageCatalog,
 } from "./bezi-launch-flow";
 
 describe("Bezi launch flow", () => {
@@ -153,5 +154,13 @@ describe("Bezi launch flow", () => {
       type: "slow",
     });
     expect(loading).toMatchObject({ phase: "connecting", slow: true });
+  });
+
+  it("does not block initial workspace loading on a complete Pages scan", () => {
+    expect(shouldRequestCompletePageCatalog("loading-workspaces", 0, 120_000)).toBe(
+      false,
+    );
+    expect(shouldRequestCompletePageCatalog("ready", 0, 120_000)).toBe(true);
+    expect(shouldRequestCompletePageCatalog("ready", 90_000, 120_000)).toBe(false);
   });
 });

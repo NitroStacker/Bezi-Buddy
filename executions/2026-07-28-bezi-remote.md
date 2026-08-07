@@ -27,6 +27,7 @@ path to an Expo development build and App Store distribution.
 - [x] Unity Editor package and typed command handling.
 - [x] Negotiated companion WebRTC H.264/Opus pipeline and input DataChannel.
 - [x] One-hostname, zero-login Cloudflare Quick Tunnel proof launcher.
+- [x] Installed-APK Android emulator pairing, Bezi, Unity, and reconnect validation.
 - [ ] Physical-iPhone cellular playback/input validation and handoff.
 
 ## Assumptions
@@ -48,8 +49,9 @@ path to an Expo development build and App Store distribution.
 - Relay: local D1 migration and live Worker/Durable Object smoke pass for
   pairing, shared session salt, opaque routing, lease denial, lease acquisition,
   and targeted host response.
-- Mobile: TypeScript, Expo lint, and four Vitest checks pass. The phone UI now
-  exposes Bezi and Unity as the only primary tabs.
+- Mobile: TypeScript, Expo lint, and 61 Vitest checks pass. The phone UI exposes
+  Bezi and Unity as the only primary tabs. Installed release clients ignore
+  Expo proof credential overrides and rely on Android SecureStore pairing.
 - Companion: Rust format/check plus seven tests pass, including input disarm,
   method allowlist, crypto interoperability, and capability gating.
 - Unity: `app.beziremote.unity` is installed in the open Battle Soccer project;
@@ -65,10 +67,21 @@ path to an Expo development build and App Store distribution.
   relay health through the path mux and passed pairing, tickets, WebSocket frame
   routing, and controller-lease enforcement without Cloudflare authentication.
 - Packaging: Tauri produced MSI and NSIS x64 installers with
-  `native-streaming` enabled. Expo typecheck/lint and all 14 TypeScript tests
-  pass; all eight non-hardware and both interactive media Rust tests pass.
+  `native-streaming` enabled. Expo typecheck/lint and all 14 mobile test files
+  (61 tests) pass; all eight non-hardware and both interactive media Rust tests
+  pass.
+- Android pre-handoff: an Android 15 x86_64 emulator installed the preview APK,
+  accepted the expiring secure bootstrap, discovered the running Windows host,
+  obtained a session ticket, and opened the encrypted WebSocket. Bezi loaded
+  real workspaces, projects, and an existing live thread; Unity reported the
+  connected 6000.3.16f1 Editor and open project. A forced cold restart repeated
+  host discovery and reconnection with no app TLS error or crash.
+- Android regressions found and fixed: initial workspace loading now uses the
+  fast catalog instead of failing on an incomplete desktop Pages scan, and
+  installed clients no longer let stale Expo proof variables override the
+  credentials saved from a new Android setup link.
 
 ## Resume point
 
-Run `pnpm proof:expo-go`, scan the companion QR from a physical iPhone on
-cellular, and validate decoded audio/video, touch input, reconnect, and latency.
+Build and distribute the replacement Android APK from the validated commit.
+The remaining external gate is physical-iPhone cellular playback/input testing.

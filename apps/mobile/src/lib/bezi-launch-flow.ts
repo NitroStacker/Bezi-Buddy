@@ -196,6 +196,14 @@ export function isBeziLaunchPending(state: BeziLaunchState): boolean {
   return state.phase !== "ready";
 }
 
+export function shouldRequestCompletePageCatalog(
+  phase: BeziLaunchPhase,
+  lastCompleteRequestAt: number,
+  now: number,
+): boolean {
+  return phase === "ready" && now - lastCompleteRequestAt >= 60_000;
+}
+
 function phaseForOperation(
   operation: BeziLaunchOperation,
 ): ResumableLaunchPhase {

@@ -47,6 +47,7 @@ import {
   initialBeziLaunchState,
   isBeziLaunchPending,
   reduceBeziLaunchState,
+  shouldRequestCompletePageCatalog,
   type BeziLaunchState,
 } from "@/lib/bezi-launch-flow";
 import {
@@ -289,6 +290,7 @@ export default function BeziMobileScreen() {
       });
       return;
     }
+    lastCompleteCatalogRequestAt.current = Date.now();
     catalogRequest.current = requestId;
     armCatalogTimeout(requestId);
   }, [armCatalogTimeout, connected, send]);
@@ -626,8 +628,12 @@ export default function BeziMobileScreen() {
     if (!connected || !shouldLoadCatalog || destination === "pages") return;
     const refresh = () => {
       if (catalogRequest.current) return;
-      const completePages =
-        Date.now() - lastCompleteCatalogRequestAt.current >= 60_000;
+      const now = Date.now();
+      const completePages = shouldRequestCompletePageCatalog(
+        launchStateRef.current.phase,
+        lastCompleteCatalogRequestAt.current,
+        now,
+      );
       const requestId = send(
         "bezi.catalog.get",
         completePages ? { completePages: true } : {},
@@ -635,7 +641,7 @@ export default function BeziMobileScreen() {
       );
       if (!requestId) return;
       catalogRequest.current = requestId;
-      if (completePages) lastCompleteCatalogRequestAt.current = Date.now();
+      if (completePages) lastCompleteCatalogRequestAt.current = now;
       armCatalogTimeout(requestId);
     };
     refresh();
