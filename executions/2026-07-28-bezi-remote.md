@@ -80,8 +80,19 @@ path to an Expo development build and App Store distribution.
   fast catalog instead of failing on an incomplete desktop Pages scan, and
   installed clients no longer let stale Expo proof variables override the
   credentials saved from a new Android setup link.
+- Android signed handoff: EAS preview build
+  `f36c06eb-4fc8-498f-acba-955d4713296e` finished successfully and was
+  downloaded as `dist/bezi-buddy-android/Bezi Buddy Android.apk` (SHA-256
+  `4259AC510ABDBBE6D6BF89DE62ABBFBE0125EB2488F536E93647B69C6307756C`).
+  The exact signed artifact was clean-installed after uninstalling the prior
+  emulator app, paired through the live Windows companion bootstrap, opened
+  Demo / Krazy Kicks / Canvas Export Compatibility in Bezi, and reported Unity
+  `Live` with Editor `6000.3.16f1`, scene `untitled 2`, and live hierarchy data.
+  Force-stop and cold relaunch reconnected from Android SecureStore without a
+  second pairing step, TLS failure, or app crash.
 
 ## Resume point
 
-Build and distribute the replacement Android APK from the validated commit.
-The remaining external gate is physical-iPhone cellular playback/input testing.
+Distribute the validated Android APK and Android CLI-style Windows setup bundle
+for physical Android testing. The remaining external gate is physical-iPhone
+cellular playback/input testing.
