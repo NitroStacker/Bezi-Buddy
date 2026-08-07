@@ -96,6 +96,11 @@ path to an Expo development build and App Store distribution.
   logcat showed continuing H.264 depacketization/decoding with no candidate-order
   error, TLS failure, fatal exception, or app crash. A forced cold restart then
   reconnected from Android SecureStore without pairing again.
+- Thread live-follow: streamed Bezi responses now keep the newest text in view
+  through a frame-coalesced `FlatList.scrollToEnd`. Only a deliberate user drag
+  toward older messages pauses following; programmatic scroll/layout events do
+  not. Returning to the actual bottom re-enables following. Three focused state
+  tests pass alongside the complete 64-test mobile suite.
 - Android signed handoff: EAS preview build
   `f36c06eb-4fc8-498f-acba-955d4713296e` finished successfully and was
   downloaded as `dist/bezi-buddy-android/Bezi Buddy Android.apk` (SHA-256
