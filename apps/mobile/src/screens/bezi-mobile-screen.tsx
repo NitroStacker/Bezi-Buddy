@@ -90,9 +90,8 @@ import {
   type BeziSession,
 } from "@/lib/bezi-session";
 import {
-  isThreadAtEnd,
-  shouldPauseThreadFollow,
-  threadDistanceFromEnd,
+  THREAD_FOLLOW_IDLE_MS,
+  threadFollowResumeDelay,
 } from "@/lib/thread-follow";
 import {
   applyWorkspaceFolderState,
@@ -247,8 +246,9 @@ export default function BeziMobileScreen() {
   const timelineRef = useRef<FlatList<ChatEntry>>(null);
   const timelinePinned = useRef(true);
   const timelineDragging = useRef(false);
-  const timelineDragStartOffset = useRef(0);
   const timelineFollowFrame = useRef<number | null>(null);
+  const timelineLastInteractionAt = useRef<number | null>(null);
+  const timelineResumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousDesktopWorkspaceId = useRef<string | null>(null);
   const previousDesktopProjectId = useRef<string | null>(null);
   const launchStateRef = useRef(launchState);
@@ -267,6 +267,43 @@ export default function BeziMobileScreen() {
       timelineRef.current?.scrollToEnd({ animated });
     });
   }, []);
+  const resumeTimelineAfterIdle = useCallback(() => {
+    timelineResumeTimer.current = null;
+    const lastInteractionAt = timelineLastInteractionAt.current;
+    if (lastInteractionAt === null) return;
+
+    const remaining = threadFollowResumeDelay(lastInteractionAt, Date.now());
+    if (remaining > 0) {
+      timelineResumeTimer.current = setTimeout(resumeTimelineAfterIdle, remaining);
+      return;
+    }
+
+    if (timelineDragging.current) {
+      timelineLastInteractionAt.current = Date.now();
+      timelineResumeTimer.current = setTimeout(
+        resumeTimelineAfterIdle,
+        THREAD_FOLLOW_IDLE_MS,
+      );
+      return;
+    }
+
+    timelineLastInteractionAt.current = null;
+    timelinePinned.current = true;
+    scheduleTimelineToEnd(false);
+  }, [scheduleTimelineToEnd]);
+  const suspendTimelineFollow = useCallback(() => {
+    timelineLastInteractionAt.current = Date.now();
+    timelinePinned.current = false;
+    if (timelineFollowFrame.current !== null) {
+      cancelAnimationFrame(timelineFollowFrame.current);
+      timelineFollowFrame.current = null;
+    }
+    if (timelineResumeTimer.current) clearTimeout(timelineResumeTimer.current);
+    timelineResumeTimer.current = setTimeout(
+      resumeTimelineAfterIdle,
+      THREAD_FOLLOW_IDLE_MS,
+    );
+  }, [resumeTimelineAfterIdle]);
   const armCatalogTimeout = useCallback((requestId: string) => {
     if (catalogTimeout.current) clearTimeout(catalogTimeout.current);
     catalogTimeout.current = setTimeout(() => {
@@ -318,6 +355,7 @@ export default function BeziMobileScreen() {
       if (timelineFollowFrame.current !== null) {
         cancelAnimationFrame(timelineFollowFrame.current);
       }
+      if (timelineResumeTimer.current) clearTimeout(timelineResumeTimer.current);
     },
     [],
   );
@@ -328,8 +366,10 @@ export default function BeziMobileScreen() {
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
     const showSubscription = Keyboard.addListener(showEvent, () => {
       setKeyboardVisible(true);
-      timelinePinned.current = true;
-      scheduleTimelineToEnd(true);
+      if (timelineLastInteractionAt.current === null) {
+        timelinePinned.current = true;
+        scheduleTimelineToEnd(true);
+      }
     });
     const hideSubscription = Keyboard.addListener(hideEvent, () => {
       setKeyboardVisible(false);
@@ -1819,53 +1859,24 @@ export default function BeziMobileScreen() {
                   scheduleTimelineToEnd(false);
                 }
               }}
-              onScroll={({ nativeEvent }) => {
-                if (
-                  timelineDragging.current &&
-                  timelinePinned.current &&
-                  shouldPauseThreadFollow(
-                    timelineDragStartOffset.current,
-                    nativeEvent.contentOffset.y,
-                  )
-                ) {
-                  timelinePinned.current = false;
-                }
+              onScroll={() => {
+                if (timelineDragging.current) suspendTimelineFollow();
               }}
-              onScrollBeginDrag={({ nativeEvent }) => {
-                if (timelineFollowFrame.current !== null) {
-                  cancelAnimationFrame(timelineFollowFrame.current);
-                  timelineFollowFrame.current = null;
-                }
+              onScrollBeginDrag={() => {
                 timelineDragging.current = true;
-                timelineDragStartOffset.current = nativeEvent.contentOffset.y;
+                suspendTimelineFollow();
               }}
-              onScrollEndDrag={({ nativeEvent }) => {
-                const distanceFromEnd = threadDistanceFromEnd(
-                  nativeEvent.contentSize.height,
-                  nativeEvent.layoutMeasurement.height,
-                  nativeEvent.contentOffset.y,
-                );
-                if (
-                  timelinePinned.current &&
-                  shouldPauseThreadFollow(
-                    timelineDragStartOffset.current,
-                    nativeEvent.contentOffset.y,
-                  )
-                ) {
-                  timelinePinned.current = false;
-                }
-                if (isThreadAtEnd(distanceFromEnd)) timelinePinned.current = true;
+              onScrollEndDrag={() => {
                 timelineDragging.current = false;
-                if (timelinePinned.current) scheduleTimelineToEnd(false);
+                suspendTimelineFollow();
               }}
-              onMomentumScrollEnd={({ nativeEvent }) => {
-                const distanceFromEnd = threadDistanceFromEnd(
-                  nativeEvent.contentSize.height,
-                  nativeEvent.layoutMeasurement.height,
-                  nativeEvent.contentOffset.y,
-                );
-                if (isThreadAtEnd(distanceFromEnd)) timelinePinned.current = true;
-                if (timelinePinned.current) scheduleTimelineToEnd(false);
+              onMomentumScrollBegin={() => {
+                timelineDragging.current = true;
+                suspendTimelineFollow();
+              }}
+              onMomentumScrollEnd={() => {
+                timelineDragging.current = false;
+                suspendTimelineFollow();
               }}
               ref={timelineRef}
               removeClippedSubviews={Platform.OS === "android"}
@@ -1911,8 +1922,10 @@ export default function BeziMobileScreen() {
                   multiline
                   onChangeText={updateComposer}
                   onFocus={() => {
-                    timelinePinned.current = true;
-                    scheduleTimelineToEnd(true);
+                    if (timelineLastInteractionAt.current === null) {
+                      timelinePinned.current = true;
+                      scheduleTimelineToEnd(true);
+                    }
                   }}
                   onSelectionChange={({ nativeEvent }) => {
                     setComposerSelection(nativeEvent.selection);

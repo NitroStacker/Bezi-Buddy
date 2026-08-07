@@ -1,21 +1,9 @@
-export const THREAD_FOLLOW_SCROLL_EPSILON = 8;
-export const THREAD_FOLLOW_END_EPSILON = 8;
+export const THREAD_FOLLOW_IDLE_MS = 15_000;
 
-export function threadDistanceFromEnd(
-  contentHeight: number,
-  viewportHeight: number,
-  offsetY: number,
+export function threadFollowResumeDelay(
+  lastInteractionAt: number,
+  now: number,
 ) {
-  return Math.max(0, contentHeight - viewportHeight - offsetY);
-}
-
-export function shouldPauseThreadFollow(
-  dragStartOffsetY: number,
-  currentOffsetY: number,
-) {
-  return dragStartOffsetY - currentOffsetY > THREAD_FOLLOW_SCROLL_EPSILON;
-}
-
-export function isThreadAtEnd(distanceFromEnd: number) {
-  return distanceFromEnd <= THREAD_FOLLOW_END_EPSILON;
+  const elapsed = Math.max(0, now - lastInteractionAt);
+  return Math.max(0, THREAD_FOLLOW_IDLE_MS - elapsed);
 }
