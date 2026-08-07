@@ -68,8 +68,10 @@ path to an Expo development build and App Store distribution.
   routing, and controller-lease enforcement without Cloudflare authentication.
 - Packaging: Tauri produced MSI and NSIS x64 installers with
   `native-streaming` enabled. Expo typecheck/lint and all 14 mobile test files
-  (61 tests) pass; all eight non-hardware and both interactive media Rust tests
-  pass.
+  (61 tests) pass; the native companion suite passes 33 tests with two
+  interactive hardware tests intentionally ignored in the default run. The
+  interactive Bezi-window media test also passes separately with real H.264
+  video and Opus audio RTP.
 - Android pre-handoff: an Android 15 x86_64 emulator installed the preview APK,
   accepted the expiring secure bootstrap, discovered the running Windows host,
   obtained a session ticket, and opened the encrypted WebSocket. Bezi loaded
@@ -79,7 +81,21 @@ path to an Expo development build and App Store distribution.
 - Android regressions found and fixed: initial workspace loading now uses the
   fast catalog instead of failing on an incomplete desktop Pages scan, and
   installed clients no longer let stale Expo proof variables override the
-  credentials saved from a new Android setup link.
+  credentials saved from a new Android setup link. The WebRTC viewer now
+  preserves every config/offer/ICE event, serializes their delivery inside the
+  Android WebView, accepts streamless audio/video tracks, and correlates native
+  trickle ICE with the active stream request. The Windows setups were rebuilt
+  with the `native-streaming` companion payload and both embedded-payload checks
+  pass.
+- Android live-media proof: Android 15 applied preview update
+  `019fdd4c-03f7-7e3a-896e-4f4664799c5d`, paired to the real Windows companion,
+  selected Demo / Krazy Kicks, and decoded the Unity Editor Game view over
+  WebRTC. The app simultaneously reported Unity `Live`, Editor `6000.3.16f1`,
+  scene `untitled 2`, and the live Main Camera / Directional Light / Cube
+  hierarchy. Emulator-only address translation showed bidirectional ICE traffic;
+  logcat showed continuing H.264 depacketization/decoding with no candidate-order
+  error, TLS failure, fatal exception, or app crash. A forced cold restart then
+  reconnected from Android SecureStore without pairing again.
 - Android signed handoff: EAS preview build
   `f36c06eb-4fc8-498f-acba-955d4713296e` finished successfully and was
   downloaded as `dist/bezi-buddy-android/Bezi Buddy Android.apk` (SHA-256
