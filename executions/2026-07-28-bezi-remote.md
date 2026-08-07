@@ -98,14 +98,17 @@ path to an Expo development build and App Store distribution.
   reconnected from Android SecureStore without pairing again.
 - Thread live-follow: streamed Bezi responses now keep the newest text in view
   through a frame-coalesced `FlatList.scrollToEnd`. Only a deliberate user drag
-  toward older messages pauses following; programmatic scroll/layout events do
-  not. Returning to the actual bottom re-enables following. Three focused state
-  tests pass alongside the complete 64-test mobile suite. Android preview update
-  `019fdd67-fea4-7786-8b53-2390c43fc65b` was applied and confirmed in the
-  emulator update database. A real Bezi QA thread followed a streamed 60-line
-  response, remained pixel-identical for twelve seconds after a manual upward
-  scroll while the response continued through line 100, and resumed following a
-  subsequent 30-line response after returning to the bottom.
+  now suspends following immediately, keeps it suspended through momentum, and
+  resets a 15-second idle timer for every subsequent scroll event. Keyboard
+  focus and reaching the bottom cannot bypass that cooldown; programmatic
+  scroll/layout events do not start one. Three focused timer tests pass alongside
+  the complete 64-test mobile suite. Android preview update
+  `019fdde1-035d-77a3-980d-ac620f4492f7` was applied and confirmed in the
+  emulator update database with one successful launch and no failed launches.
+  During a real 200-line streamed Bezi response, the timeline crop at 13 seconds
+  after the final manual swipe was pixel-identical to the 1-second capture (SSIM
+  `1.000000`); at 17 seconds it resumed at the newest lines (SSIM `0.366055`
+  against the paused view).
 - Android signed handoff: EAS preview build
   `f36c06eb-4fc8-498f-acba-955d4713296e` finished successfully and was
   downloaded as `dist/bezi-buddy-android/Bezi Buddy Android.apk` (SHA-256
