@@ -391,7 +391,7 @@ export default function UnityScreen() {
         <RemoteSurface
           controlEnabled={hasControl && Boolean(selectedInstance)}
           onSignal={remoteStream.onSignal}
-          signal={remoteStream.signal}
+          signals={remoteStream.signals}
         />
         <View style={styles.viewerTop}>
           <StatusPill

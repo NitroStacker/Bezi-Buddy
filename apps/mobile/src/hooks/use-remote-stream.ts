@@ -13,7 +13,7 @@ export function useRemoteStream(
   const activateTarget = useRef<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
   const [activatedTarget, setActivatedTarget] = useState<string | null>(null);
-  const [signal, setSignal] = useState<WebRtcSignal | undefined>();
+  const [signals, setSignals] = useState<WebRtcSignal[]>([]);
   const targetKey = target === "unity" && instanceId ? `${instanceId}:${source ?? "game"}` : null;
   const targetReady = target !== "unity" || activatedTarget === targetKey;
 
@@ -60,7 +60,7 @@ export function useRemoteStream(
     activateRequest.current = null;
     activateTarget.current = null;
     setActivatedTarget(null);
-    setSignal(undefined);
+    setSignals([]);
   }, [instanceId, source, target]);
 
   useEffect(
@@ -99,30 +99,41 @@ export function useRemoteStream(
             typeof sdp.type === "string" &&
             typeof sdp.sdp === "string"
           ) {
-            setSignal({
-              type: "offer",
-              sdp: { type: sdp.type as RTCSdpType, sdp: sdp.sdp },
-            });
+            const offerType = sdp.type as RTCSdpType;
+            const offerSdp = sdp.sdp;
+            setSignals((current) => [
+              ...current,
+              {
+                type: "offer",
+                sdp: { type: offerType, sdp: offerSdp },
+              },
+            ]);
           }
         } else if (payload.type === "stream.ice") {
           const candidate = payload.body.candidate;
           if (isRecord(candidate)) {
-            setSignal({
-              type: "ice",
-              candidate: candidate as RTCIceCandidateInit,
-            });
+            setSignals((current) => [
+              ...current,
+              {
+                type: "ice",
+                candidate: candidate as RTCIceCandidateInit,
+              },
+            ]);
           }
         } else if (payload.type === "stream.config") {
           const iceServers = payload.body.iceServers;
           if (Array.isArray(iceServers)) {
-            setSignal({
-              type: "config",
-              iceServers: iceServers as RTCIceServer[],
-            });
+            setSignals((current) => [
+              ...current,
+              {
+                type: "config",
+                iceServers: iceServers as RTCIceServer[],
+              },
+            ]);
           }
         } else if (payload.type === "stream.error") {
           startRequest.current = null;
-          setSignal(undefined);
+          setSignals([]);
         }
       }),
     [subscribe],
@@ -158,7 +169,7 @@ export function useRemoteStream(
     [connected, instanceId, send, source, target],
   );
 
-  return { signal, onSignal };
+  return { signals, onSignal };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

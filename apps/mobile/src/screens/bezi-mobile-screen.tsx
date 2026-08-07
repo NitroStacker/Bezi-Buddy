@@ -2842,7 +2842,7 @@ function WorkspaceView({
         <RemoteSurface
           controlEnabled={hasControl}
           onSignal={remoteStream.onSignal}
-          signal={remoteStream.signal}
+          signals={remoteStream.signals}
         />
       </View>
     );

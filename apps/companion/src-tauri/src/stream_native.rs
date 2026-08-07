@@ -13,6 +13,7 @@ use gstreamer_sdp as gst_sdp;
 use gstreamer_webrtc as gst_webrtc;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::{
@@ -455,7 +456,7 @@ fn connect_signaling(
         };
         let _ = events.send(StreamEvent::new(
             &device_id,
-            &Uuid::new_v4().to_string(),
+            &request_id,
             "stream.ice",
             json!({
                 "candidate": {
@@ -601,10 +602,11 @@ mod tests {
         let control = Arc::new(ControlState::default());
         let manager = NativeMediaManager::new(control).expect("GStreamer should initialize");
         let mut events = manager.subscribe();
+        let request_id = Uuid::new_v4().to_string();
         manager
             .start(
                 "test-device",
-                &Uuid::new_v4().to_string(),
+                &request_id,
                 process_id,
                 None,
                 StreamPreset::Balanced,
@@ -615,6 +617,7 @@ mod tests {
         let sdp = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let event = events.recv().await.expect("media event channel closed");
+                assert_eq!(event.request_id, request_id);
                 if event.message_type == "stream.error" {
                     panic!("media pipeline failed: {}", event.body);
                 }
@@ -748,6 +751,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(100), events.recv()).await
             {
                 if event.message_type == "stream.ice" {
+                    assert_eq!(event.request_id, request_id);
                     let index = event
                         .body
                         .pointer("/candidate/sdpMLineIndex")

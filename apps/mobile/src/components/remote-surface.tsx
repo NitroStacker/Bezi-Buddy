@@ -9,15 +9,16 @@ export type WebRtcSignal =
   | { type: "config"; iceServers: RTCIceServer[] };
 
 export function RemoteSurface({
-  signal,
+  signals,
   onSignal,
   controlEnabled,
 }: {
-  signal?: WebRtcSignal;
+  signals?: readonly WebRtcSignal[];
   onSignal?: (message: Record<string, unknown>) => void;
   controlEnabled: boolean;
 }) {
   const webView = useRef<WebView>(null);
+  const sentSignalCount = useRef(0);
   const source = useMemo(() => ({ html: viewerHtml }), []);
 
   const handleMessage = useCallback(
@@ -32,10 +33,16 @@ export function RemoteSurface({
   );
 
   useEffect(() => {
-    if (signal) {
+    if (!signals?.length) {
+      sentSignalCount.current = 0;
+      return;
+    }
+    if (sentSignalCount.current > signals.length) sentSignalCount.current = 0;
+    for (const signal of signals.slice(sentSignalCount.current)) {
       webView.current?.postMessage(JSON.stringify({ type: "signal", payload: signal }));
     }
-  }, [signal]);
+    sentSignalCount.current = signals.length;
+  }, [signals]);
 
   useEffect(() => {
     webView.current?.postMessage(
@@ -143,20 +150,32 @@ linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-siz
 <div id="live">LIVE</div>
 <script>
 const send=(value)=>window.ReactNativeWebView?.postMessage(JSON.stringify(value));
-let pc=null,control=false,channel=null,pendingIce=[];
+let pc=null,control=false,channel=null,pendingIce=[],fallbackStream=null;
 const video=document.getElementById("video"),idle=document.getElementById("idle"),live=document.getElementById("live");
 async function ensure(iceServers=[]){
  if(pc&&!["failed","closed"].includes(pc.connectionState))return pc;
  if(pc)pc.close();
  pc=new RTCPeerConnection({iceServers,bundlePolicy:"max-bundle"});
- pc.ontrack=e=>{video.srcObject=e.streams[0];video.style.display="block";idle.style.display="none";live.style.display="block";video.play().catch(error=>send({type:"viewer.audio-blocked",message:error.message}));send({type:"viewer.track",kind:e.track.kind})};
+ fallbackStream=new MediaStream();
+ pc.ontrack=e=>{
+  const stream=e.streams[0]||fallbackStream;
+  if(!e.streams[0]&&!fallbackStream.getTracks().some(track=>track.id===e.track.id))fallbackStream.addTrack(e.track);
+  video.srcObject=stream;
+  if(e.track.kind==="video"){
+   video.style.display="block";
+   idle.style.display="none";
+   live.style.display="block";
+   video.play().catch(error=>send({type:"viewer.audio-blocked",message:error.message}));
+  }
+  send({type:"viewer.track",kind:e.track.kind,streamless:e.streams.length===0});
+ };
  pc.onicecandidate=e=>e.candidate&&send({type:"viewer.ice",candidate:e.candidate});
  pc.ondatachannel=e=>{channel=e.channel;channel.onopen=()=>send({type:"viewer.data-open"})};
  pc.onconnectionstatechange=()=>send({type:"viewer.state",state:pc.connectionState});
  return pc;
 }
 async function signal(value){
- if(value.type==="config"){const peer=await ensure(value.iceServers);peer.setConfiguration({iceServers:value.iceServers});return}
+ if(value.type==="config"){await ensure(value.iceServers);return}
  const peer=await ensure();
  if(value.type==="offer"){
   await peer.setRemoteDescription(value.sdp);
@@ -195,9 +214,14 @@ function input(event){
  event.preventDefault();
 }
 ["touchstart","touchmove","touchend","touchcancel"].forEach(name=>document.addEventListener(name,input,{passive:false}));
-function receive(event){
- try{const message=JSON.parse(event.data);if(message.type==="signal")signal(message.payload).catch(error=>send({type:"viewer.error",message:error.message}));if(message.type==="control")control=!!message.enabled}catch{}
-}
+ let signalChain=Promise.resolve();
+ function receive(event){
+  try{
+   const message=JSON.parse(event.data);
+   if(message.type==="signal")signalChain=signalChain.then(()=>signal(message.payload)).catch(error=>send({type:"viewer.error",message:error.message}));
+   if(message.type==="control")control=!!message.enabled;
+  }catch{}
+ }
 window.addEventListener("message",receive);document.addEventListener("message",receive);
 send({type:"viewer.ready",webrtc:!!window.RTCPeerConnection});
 </script>
