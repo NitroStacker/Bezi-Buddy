@@ -344,7 +344,7 @@ internal sealed class SetupForm : Form
         var card = new Panel
         {
             Width = 242,
-            Height = 190,
+            Height = 216,
             Margin = new Padding(0, 0, 14, 0),
             Padding = new Padding(22),
             BackColor = Surface,
@@ -358,7 +358,7 @@ internal sealed class SetupForm : Form
         titleLabel.AutoSize = true;
         var copyLabel = NewLabel(copy, 9, TextSecondary);
         copyLabel.Location = new Point(22, 94);
-        copyLabel.Size = new Size(194, 78);
+        copyLabel.Size = new Size(194, 104);
         copyLabel.AutoSize = false;
         card.Controls.Add(numberLabel);
         card.Controls.Add(titleLabel);
