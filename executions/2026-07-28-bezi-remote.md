@@ -100,7 +100,12 @@ path to an Expo development build and App Store distribution.
   through a frame-coalesced `FlatList.scrollToEnd`. Only a deliberate user drag
   toward older messages pauses following; programmatic scroll/layout events do
   not. Returning to the actual bottom re-enables following. Three focused state
-  tests pass alongside the complete 64-test mobile suite.
+  tests pass alongside the complete 64-test mobile suite. Android preview update
+  `019fdd67-fea4-7786-8b53-2390c43fc65b` was applied and confirmed in the
+  emulator update database. A real Bezi QA thread followed a streamed 60-line
+  response, remained pixel-identical for twelve seconds after a manual upward
+  scroll while the response continued through line 100, and resumed following a
+  subsequent 30-line response after returning to the bottom.
 - Android signed handoff: EAS preview build
   `f36c06eb-4fc8-498f-acba-955d4713296e` finished successfully and was
   downloaded as `dist/bezi-buddy-android/Bezi Buddy Android.apk` (SHA-256
