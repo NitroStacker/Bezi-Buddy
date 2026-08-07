@@ -110,15 +110,30 @@ path to an Expo development build and App Store distribution.
   `1.000000`); at 17 seconds it resumed at the newest lines (SSIM `0.366055`
   against the paused view).
 - Android signed handoff: EAS preview build
-  `f36c06eb-4fc8-498f-acba-955d4713296e` finished successfully and was
-  downloaded as `dist/bezi-buddy-android/Bezi Buddy Android.apk` (SHA-256
-  `4259AC510ABDBBE6D6BF89DE62ABBFBE0125EB2488F536E93647B69C6307756C`).
-  The exact signed artifact was clean-installed after uninstalling the prior
-  emulator app, paired through the live Windows companion bootstrap, opened
-  Demo / Krazy Kicks / Canvas Export Compatibility in Bezi, and reported Unity
-  `Live` with Editor `6000.3.16f1`, scene `untitled 2`, and live hierarchy data.
-  Force-stop and cold relaunch reconnected from Android SecureStore without a
-  second pairing step, TLS failure, or app crash.
+  `9d3a7224-6557-4c13-8788-7a3c10dde675` (embedded commit `853869a`) finished
+  successfully and was downloaded from its exact artifact URL as
+  `dist/bezi-buddy-android/Bezi Buddy Android.apk` (106,188,994 bytes; SHA-256
+  `55D597606F3FD4C296A169D303F48507D96EFD1ADCE27B84E8D9D41E424DAF49`).
+  Android Build Tools 36 verified its v2 APK signature, single RSA-2048 signer,
+  package `app.beziremote.mobile`, and version `0.1.0 (1)`. After a clean
+  uninstall, that exact APK paired through the running Windows companion,
+  loaded the real Demo workspace, Krazy Kicks project, and existing Bezi
+  thread, then applied preview update
+  `019fdde1-035d-77a3-980d-ac620f4492f7` with one successful launch and no
+  failed launches. Unity reconnected as `Live` on Editor `6000.3.16f1`, scene
+  `untitled 2`; Android rendered the real Game view through WebRTC H.264/AVC
+  using `c2.goldfish.h264.decoder` while the hierarchy simultaneously listed
+  Main Camera, Directional Light, Cube, and Plane. A force-stop/cold relaunch
+  returned directly to workspace selection from Android SecureStore, required
+  no second pairing, and restored both live Unity video and hierarchy. Evidence
+  screenshots are `exact-apk-workspaces.png`, `exact-apk-bezi.png`,
+  `exact-apk-unity-live.png`, `exact-apk-cold-restart.png`, and
+  `exact-apk-cold-unity.png` in the Android lab evidence directory.
+- Windows handoff packages: both setup payload checks and the Unity bridge
+  install/update test pass without a rebuild. `Bezi Buddy Android Setup.exe`
+  hashes to `97FBC1B575BCD01630BB81A15248940D1ED98D4AB3AF5A6921A644D4CB838F64`;
+  `Bezi Buddy iOS Expo Go Setup.exe` hashes to
+  `CEE9F126194842EAE42CFE8D095B9674988D7039D523D1A75F653506746777CD`.
 
 ## Resume point
 
